@@ -4,19 +4,26 @@ Bộ đọc dữ liệu chung cho MỌI cửa hàng (không viết riêng cho sh
     from loader import load_business
     biz = load_business("data/train/data/biz_101")
     biz.tables            # dict: tên bảng -> pandas DataFrame đã làm sạch
-    biz.schema_text()     # bản mô tả các bảng để đưa vào prompt LLM
-    biz.readme            # nội dung README.md
+    biz.schema_text()     # bản mô tả các bảng (kèm ghi chú README) để đưa vào prompt LLM
+    biz.notes             # phần "Quy ước"/ghi chú của README (không gồm danh sách cột)
+    biz.data_end          # ngày cuối có dữ liệu theo README ("Dữ liệu có đến hết ...") hoặc None
 
 Các bước làm sạch (giải thích cho người mới):
   1. Đọc mọi file .csv / .xlsx (tất cả sheet) / .sqlite trong thư mục shop.
-  2. Tìm dòng tên cột (có file có 1-2 dòng tiêu đề phía trên), bỏ dòng trống, dòng "Tổng cộng".
+  2. Tìm dòng tên cột, bỏ dòng trống, dòng tiêu đề, dòng "Tổng cộng", dòng lặp tên cột.
   3. Ghép các mảnh cùng một bảng (mỗi tháng 1 sheet, file _1/_2, file theo tháng/năm).
-     Thêm cột "_nguon" (file|sheet) để biết dòng đến từ đâu, vì rulebook có luật
-     "ngày không ghi năm thì lấy năm của sheet".
-  4. Chuẩn hoá kiểu dữ liệu: chữ số kiểu "1.234.567đ" -> số; "05/03/2025" -> ngày.
-     Cột mã (mã hàng, SĐT, IMEI, biển số...) giữ nguyên dạng chữ.
-  5. Đọc README.md để lấy nghĩa từng cột, đưa vào schema_text() cho LLM.
-  6. Lưu cache (file .pkl trong /tmp) để lần sau đọc lại cực nhanh.
+     Cột "_nguon" = file|sheet cho biết dòng đến từ đâu.
+  4. Điền xuống ô trống theo nhóm (rulebook §8): các cột cấp đơn (mã đơn, ngày, khách...)
+     chỉ ghi ở dòng đầu đơn thì được điền cho các dòng sau của cùng đơn.
+  5. Chuẩn hoá kiểu dữ liệu:
+       - ngày: datetime Excel, số serial Excel (45658), "1 thg 6 2025", "01/02/2025",
+         "1/1" (không năm -> lấy năm theo tên sheet/file), lẫn kiểu tháng/ngày -> chọn cách
+         đọc khớp với các dòng xung quanh.
+       - tiền: "1.234.567đ", "1tr440", "16,56tr", "396k", "20,1tr" -> số.
+       - số lượng ghi kèm đơn vị: "3 chai", "1 bao 25kg" -> số + cột "(đơn vị ghi kèm)".
+       - cột mã (mã hàng, SĐT, IMEI, MST, biển số...) giữ nguyên dạng chữ.
+  6. Lấy nghĩa từng cột từ README (mục "Cột trong `file`"), phần còn lại là ghi chú.
+  7. Lưu cache (.pkl trong /tmp) để lần sau đọc lại tức thì.
 """
 from __future__ import annotations
 
@@ -28,11 +35,13 @@ import sqlite3
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
 
 CACHE_DIR = os.environ.get("DATAMATE_CACHE", "/tmp/datamate_cache")
+LOADER_VERSION = "v2"
 
 # --------------------------------------------------------------------------- tiện ích chữ
 
@@ -47,27 +56,30 @@ def fold(s) -> str:
 def nfc(s) -> str:
     return unicodedata.normalize("NFC", str(s)).strip()
 
+
+def _isnull(v) -> bool:
+    if v is None:
+        return True
+    try:
+        return bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
+
 # --------------------------------------------------------------------------- đọc file thô
 
 
 def _read_excel_raw(path):
-    """Trả về {tên sheet: DataFrame không header}. Dùng calamine (nhanh) nếu có, không thì openpyxl."""
-    for engine in ("calamine", "openpyxl"):
-        try:
-            return pd.read_excel(path, sheet_name=None, header=None, engine=engine)
-        except ImportError:
-            continue
-        except ValueError as e:              # engine không được hỗ trợ
-            if "calamine" in str(e):
-                continue
-            raise
-    return pd.read_excel(path, sheet_name=None, header=None)
+    """{tên sheet: DataFrame không header}. Dùng calamine (nhanh) nếu có, không thì openpyxl."""
+    try:
+        return pd.read_excel(path, sheet_name=None, header=None, engine="calamine")
+    except (ImportError, ValueError):
+        return pd.read_excel(path, sheet_name=None, header=None, engine="openpyxl")
 
 
 def _read_csv_raw(path):
     for enc in ("utf-8-sig", "utf-8", "cp1258", "latin-1"):
         try:
-            return pd.read_csv(path, header=None, dtype=str, encoding=enc,
+            return pd.read_csv(path, header=None, dtype=object, encoding=enc,
                                keep_default_na=True, low_memory=False)
         except (UnicodeDecodeError, pd.errors.ParserError):
             continue
@@ -91,9 +103,9 @@ def _guess_header_row(df: pd.DataFrame, look=15) -> int:
 def _clean_columns(values) -> list[str]:
     cols, seen = [], {}
     for i, v in enumerate(values):
-        name = nfc(v) if (v is not None and not (isinstance(v, float) and np.isnan(v))) else ""
-        name = re.sub(r"\s+", " ", name) or f"cot_{i + 1}"
-        if name in seen:                      # tên cột trùng -> thêm hậu tố
+        name = "" if _isnull(v) else re.sub(r"\s+", " ", nfc(v))
+        name = name or f"cot_{i + 1}"
+        if name in seen:
             seen[name] += 1
             name = f"{name}_{seen[name]}"
         else:
@@ -106,7 +118,7 @@ _TOTAL_RE = re.compile(r"^(tong cong|tong|cong|total|sum)\b")
 
 
 def _frame_from_raw(raw: pd.DataFrame) -> pd.DataFrame:
-    """Bảng thô (không header) -> bảng có tên cột, đã bỏ dòng tiêu đề/trống/tổng."""
+    """Bảng thô (không header) -> bảng có tên cột, đã bỏ dòng tiêu đề/trống/tổng/lặp header."""
     raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
     if raw.empty:
         return pd.DataFrame()
@@ -114,14 +126,12 @@ def _frame_from_raw(raw: pd.DataFrame) -> pd.DataFrame:
     cols = _clean_columns(raw.iloc[h].tolist())
     df = raw.iloc[h + 1:].copy()
     df.columns = cols
-    # bỏ dòng lặp lại tên cột (hay gặp khi nối nhiều bảng xuất) - chỉ xét dòng nghi ngờ cho nhanh
     header_fold = [fold(c) for c in cols]
     first = df.iloc[:, 0]
     cand = first.map(lambda v: isinstance(v, str) and fold(v) == header_fold[0])
     if cand.any():
         again = df[cand].apply(lambda r: [fold(x) for x in r.tolist()] == header_fold, axis=1)
         df = df.drop(again[again].index)
-    # bỏ dòng "Tổng cộng": dòng thưa (ít ô có dữ liệu) và ô chữ đầu tiên bắt đầu bằng tổng/cộng
     n_filled = df.notna().sum(axis=1)
     sparse = df[n_filled <= 0.6 * df.shape[1]]
     if len(sparse):
@@ -144,101 +154,360 @@ _SUFFIX = re.compile(r"([\s_\-]+(\d{1,3}|\d{4}|t\d{1,2}[\s_\-]*\d{4}|thang\d{1,2
 def _base_name(file_name: str) -> str:
     stem = os.path.splitext(file_name)[0]
     prev = None
-    while prev != stem:                       # bỏ dần đuôi _1, _2026, _T1_2025, _Thang01_2025
+    while prev != stem:
         prev = stem
         stem = _SUFFIX.sub("", stem)
     return stem
 
 
-def _table_name(file_name: str, sheet: str | None, n_sheets: int) -> str:
+def _table_name(file_name: str, sheet, n_sheets: int) -> str:
     base = _base_name(file_name)
     if sheet is None or _MONTHY.match(fold(sheet)):
         return base
     return nfc(sheet) if n_sheets > 1 or fold(sheet) != "sheet1" else base
 
 
-# --------------------------------------------------------------------------- kiểu dữ liệu
+def _year_month_hint(source: str):
+    """Từ 'SoBanHang.xlsx|Tháng 01-2025' hoặc 'BanHang_T10_2025.xlsx|...' -> (2025, 1 hoặc 10)."""
+    s = fold(source)
+    m = re.search(r"(?:^|[^\d])(\d{1,2})[\s._\-/]+(20\d{2})(?:[^\d]|$)", s) or \
+        re.search(r"(?:t|thang)\s*(\d{1,2})[\s._\-]*(20\d{2})", s)
+    if m and 1 <= int(m.group(1)) <= 12:
+        return int(m.group(2)), int(m.group(1))
+    m = re.search(r"(20\d{2})[\s._\-/]+(\d{1,2})(?:[^\d]|$)", s)
+    if m and 1 <= int(m.group(2)) <= 12:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"(20\d{2})", s)
+    return (int(m.group(1)), None) if m else (None, None)
 
-_CODE_HINT = re.compile(r"(^|\s)(ma|id|code|sku|barcode|ean|so dien thoai|dien thoai|sdt|phone|di dong|"
-                        r"imei|bien so|so ct|so phieu|so hd|so hoa don|cccd|cmnd|mst|ma so thue|so the|lo)(\s|$)")
-_NUM_RE = re.compile(r"^[+-]?[\d.,\s]+(đ|d|vnd|vnđ|k)?$", re.I)
-_DATE_RE = re.compile(r"^\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}([ T]\d{1,2}:\d{2}(:\d{2})?)?$")
+# --------------------------------------------------------------------------- nhận diện loại cột
 
 
-def _to_number(s: str):
-    t = s.strip().lower().replace(" ", "")
-    t = re.sub(r"(đ|vnđ|vnd|d)$", "", t)
+_CODE_HINT = re.compile(
+    r"(^|[\s_(])(ma|id|code|sku|barcode|ean|so dien thoai|dien thoai|sdt|so dt|phone|di dong|imei|"
+    r"bien so|so ct|so phieu|so hd|so hoa don|hd|bill|cccd|cmnd|mst|ma so thue|so the|lo|ma lo|"
+    r"so chung tu|ma vach)([\s_)]|$)")
+_DATE_HINT = re.compile(r"(^|\s)(ngay|thoi gian|thoi diem|date|time|han|hsd|sinh nhat|tu ngay|den ngay|"
+                        r"ngay gio|tao luc|ngaylap|ngayban|ngay ban)(\s|$)")
+_NOT_DATE = re.compile(r"(so ngay|\(ngay\)|ky han|han no \(|han gop \(|gio$|^gio )")
+_QTY_HINT = re.compile(r"(^|\s)(so luong|sl|slg|sluong|soluong|s\.l|qty|so luong san pham|sl ban)(\s|$)")
+
+
+def _fname(name):
+    return fold(name).replace("_", " ")
+
+
+def _is_code(name, meaning=""):
+    return bool(_CODE_HINT.search(_fname(name)) or re.search(r"^(ma|so dien thoai|imei|bien so)(\s|$)", fold(meaning)))
+
+
+def _is_date_name(name, meaning=""):
+    n, m = _fname(name), fold(meaning)
+    n2 = _fname(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name))   # NgayLap -> Ngay Lap
+    if _NOT_DATE.search(n) or re.search(r"^(so ngay|gio )", m):
+        return False
+    return bool(_DATE_HINT.search(n) or _DATE_HINT.search(n2) or re.search(r"^(ngay|thoi diem|han)(\s|$)", m))
+
+# --------------------------------------------------------------------------- số và tiền
+
+
+_MONEY_TR = re.compile(r"^(\d+)tr(\d{1,3})$")
+_UNIT_MULT = [(re.compile(r"^(\d+(?:[.,]\d+)?)(tr|trieu|m)$"), 1e6),
+              (re.compile(r"^(\d+(?:[.,]\d+)?)(k|nghin|ngan)$"), 1e3)]
+
+
+def to_number(v):
+    """Chuỗi số kiểu Việt Nam -> float. Trả về None nếu không phải số."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return float(v)
+    t = fold(v).replace(" ", "")
+    t = re.sub(r"(vnd|d)$", "", t)
     if not t:
-        return np.nan
+        return None
     neg = t.startswith("-")
     t = t.lstrip("+-")
-    if "." in t and "," in t:                 # dấu xuất hiện sau cùng là dấu thập phân
-        if t.rfind(",") > t.rfind("."):
-            t = t.replace(".", "").replace(",", ".")
-        else:
-            t = t.replace(",", "")
+    m = _MONEY_TR.match(t)
+    if m:                                              # 1tr440 -> 1.440.000 ; 19tr990 ; 1tr5 -> 1.500.000
+        v = int(m.group(1)) * 1e6 + int(m.group(2).ljust(3, "0")) * 1e3
+        return -v if neg else v
+    for rx, mult in _UNIT_MULT:                        # 16,56tr ; 396k ; 2tr
+        m = rx.match(t)
+        if m:
+            v = float(m.group(1).replace(",", ".")) * mult
+            return -round(v) if neg else round(v)
+    if not re.fullmatch(r"[\d.,]+", t):
+        return None
+    if "." in t and "," in t:
+        t = t.replace(".", "").replace(",", ".") if t.rfind(",") > t.rfind(".") else t.replace(",", "")
     elif "." in t or "," in t:
         sep = "." if "." in t else ","
         parts = t.split(sep)
-        if len(parts) > 2 or (len(parts[-1]) == 3 and parts[0] != "0"):
-            t = t.replace(sep, "")            # dấu phân cách hàng nghìn: 1.234.567
+        if len(parts) > 2 or (len(parts[-1]) == 3 and parts[0] not in ("0", "")):
+            t = t.replace(sep, "")                     # 1.234.567 (hàng nghìn)
         else:
-            t = t.replace(",", ".")           # dấu thập phân: 18,6
+            t = t.replace(",", ".")                    # 18,6 (thập phân)
     try:
-        v = float(t)
+        x = float(t)
     except ValueError:
-        return None                           # None = không phải số
-    return -v if neg else v
+        return None
+    return -x if neg else x
+
+# --------------------------------------------------------------------------- ngày
 
 
-def _convert_column(name: str, s: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_bool_dtype(s):
-        return s
-    s = s.astype(object).where(s.notna(), np.nan)
+_EXCEL0 = datetime(1899, 12, 30)
+_RX_THG = re.compile(r"^(\d{1,2})\s*thg\s*(\d{1,2})[\s,]+(\d{4})$")
+_RX_DMY = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$")
+_RX_YMD = re.compile(r"^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?$")
+_RX_DM = re.compile(r"^(\d{1,2})[/\-.](\d{1,2})$")
+
+
+def _mk(y, m, d, hh=0, mi=0, ss=0):
+    try:
+        y = int(y)
+        y = y + 2000 if y < 100 else y
+        return datetime(y, int(m), int(d), int(hh or 0), int(mi or 0), int(ss or 0))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_date_value(v, year_hint):
+    """-> (datetime | None, datetime_thay_the | None). Có thay thế khi d/m và m/d đều hợp lệ."""
+    if isinstance(v, (datetime, pd.Timestamp)):
+        return (pd.Timestamp(v).to_pydatetime(), None)
+    if isinstance(v, date):
+        return (datetime(v.year, v.month, v.day), None)
+    if hasattr(v, "hour") and not hasattr(v, "year"):     # chỉ có giờ (datetime.time)
+        return (None, None)
+    if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+        if 20000 <= float(v) <= 80000:                 # số serial Excel
+            return (_EXCEL0 + timedelta(days=float(v)), None)
+        return (None, None)
+    t = nfc(v).lower()
+    if re.fullmatch(r"\d{5}(\.\d+)?", t) and 20000 <= float(t) <= 80000:
+        return (_EXCEL0 + timedelta(days=float(t)), None)
+    m = _RX_THG.match(t)
+    if m:
+        return (_mk(m[3], m[2], m[1]), None)
+    m = _RX_YMD.match(t)
+    if m:
+        return (_mk(m[1], m[2], m[3], m[4], m[5], m[6]), None)
+    m = _RX_DMY.match(t)
+    if m:
+        a, b = int(m[1]), int(m[2])
+        d1 = _mk(m[3], b, a, m[4], m[5], m[6])                    # ngày/tháng (kiểu Việt Nam)
+        d2 = _mk(m[3], a, b, m[4], m[5], m[6]) if a != b else None  # tháng/ngày
+        if d1 and d2:
+            return (d1, d2)
+        return (d1 or d2, None)
+    m = _RX_DM.match(t)
+    if m and year_hint:
+        a, b = int(m[1]), int(m[2])
+        d1, d2 = _mk(year_hint, b, a), (_mk(year_hint, a, b) if a != b else None)
+        return (d1, d2) if (d1 and d2) else (d1 or d2, None)
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", t):         # chỉ có giờ
+        return (None, None)
+    try:                                               # dạng khác (vd '2025-01-01 10:30:00.000')
+        x = pd.to_datetime(t, dayfirst=True)
+        return (x.to_pydatetime(), None) if not pd.isna(x) else (None, None)
+    except (ValueError, TypeError, OverflowError):
+        return (None, None)
+
+
+def _convert_dates(s: pd.Series, sources: pd.Series):
+    """Chuyển cột sang datetime. Trả về (Series mới, số ô phải đoán thứ tự ngày/tháng) hoặc (None, 0)."""
+    idx = s.index
+    vals = s.tolist()
+    src = sources.tolist() if sources is not None else [""] * len(vals)
+    hint_cache, primary, alt = {}, [], []
+    for v, so in zip(vals, src):
+        if _isnull(v) or (isinstance(v, str) and not v.strip()):
+            primary.append(None)
+            alt.append(None)
+            continue
+        if so not in hint_cache:
+            hint_cache[so] = _year_month_hint(so)
+        d1, d2 = _parse_date_value(v, hint_cache[so][0])
+        primary.append(d1)
+        alt.append(d2)
+    n_val = sum(1 for v in vals if not _isnull(v) and str(v).strip())
+    n_ok = sum(1 for d in primary if d is not None)
+    if n_val == 0 or n_ok < 0.9 * n_val:
+        return None, 0
+    p = pd.Series(primary, index=idx, dtype=object)
+    a = pd.Series(alt, index=idx, dtype=object)
+    amb = a.notna()
+    n_amb = int(amb.sum())
+    if n_amb:
+        # tham chiếu 1: tháng của sheet/file (nếu có)
+        hint_m = pd.Series([hint_cache[so][1] if so in hint_cache else None for so in src], index=idx)
+        # tham chiếu 2: ngày không mơ hồ gần nhất (theo thứ tự dòng, trong cùng nguồn)
+        sure = pd.to_datetime(p.where(~amb), errors="coerce")
+        grp = sources if sources is not None else pd.Series("", index=idx)
+        ref = sure.groupby(grp.values).ffill()
+        ref = ref.fillna(sure.groupby(grp.values).bfill())
+        choose_alt = []
+        for i in idx[amb]:
+            d1, d2, hm, r = p[i], a[i], hint_m[i], ref[i]
+            if hm and d1.month != d2.month and (d1.month == hm) != (d2.month == hm):
+                choose_alt.append(d2.month == hm)
+            elif not pd.isna(r):
+                choose_alt.append(abs((d2 - r).days) < abs((d1 - r).days))
+            else:
+                choose_alt.append(False)
+        sel = pd.Series(choose_alt, index=idx[amb])
+        p.loc[sel[sel].index] = a.loc[sel[sel].index]
+    return pd.to_datetime(p, errors="coerce"), n_amb
+
+
+def _split_qty(s: pd.Series):
+    """'3 chai' -> (3, 'chai'). Trả về (Series số, Series đơn vị) hoặc None."""
+    txt = s.dropna().astype(str).str.strip()
+    if txt.empty:
+        return None
+    m = txt.str.extract(r"^(-?\d+(?:[.,]\d+)?)\s*(.*)$")
+    if m[0].notna().mean() < 0.97 or (m[1].fillna("") == "").all():
+        return None
+    num = pd.Series(np.nan, index=s.index)
+    num.loc[m.index] = m[0].str.replace(",", ".").astype(float)
+    unit = pd.Series(np.nan, index=s.index, dtype=object)
+    u = m[1].where(m[1].fillna("") != "")
+    unit.loc[u.index] = u
+    return num, unit
+
+
+def _convert_column(name, s: pd.Series, sources: pd.Series, meaning: str = ""):
+    """-> (Series đã chuyển, cột phụ hoặc None, ghi chú hoặc None)."""
+    if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_bool_dtype(s):
+        return s, None, None
     non_null = s.dropna()
     if non_null.empty:
-        return s
+        return s, None, None
+    if _is_date_name(name, meaning):
+        conv, n_amb = _convert_dates(s, sources)
+        if conv is not None:
+            note = f"{n_amb} ô ngày mơ hồ ngày/tháng, đã chọn theo dòng lân cận" if n_amb else None
+            return conv, None, note
+    if pd.api.types.is_numeric_dtype(s):
+        return s, None, None
+    s = s.astype(object)
     sample = non_null.astype(str).str.strip()
-    sample = sample[sample != ""]
-    if sample.empty:
-        return s
-    is_code = bool(_CODE_HINT.search(fold(name)))
-    # đã là datetime (từ Excel) ở phần lớn ô
-    if non_null.map(lambda v: isinstance(v, (pd.Timestamp, np.datetime64)) or hasattr(v, "year")).mean() > 0.9:
-        return pd.to_datetime(s, errors="coerce")
-    # chuỗi ngày dd/mm/yyyy
-    if sample.str.match(_DATE_RE).mean() > 0.95:
-        iso = sample.str.match(r"^\d{4}").mean() > 0.5
-        out = pd.to_datetime(s.astype(str).str.strip(), errors="coerce", dayfirst=not iso, format="mixed")
-        if out.notna().sum() >= 0.95 * len(sample):
-            return out
-    if is_code:
-        return s.map(lambda v: v if pd.isna(v) else (str(int(v)) if isinstance(v, float) and v.is_integer() else nfc(v)))
-    # số (kể cả ô đã là số trong Excel)
-    numeric_like = non_null.map(lambda v: isinstance(v, (int, float, np.number)) and not isinstance(v, bool)) | \
-        sample.reindex(non_null.index).fillna("").str.match(_NUM_RE)
-    if numeric_like.mean() > 0.95:
-        conv = s.map(lambda v: v if isinstance(v, (int, float, np.number)) and not isinstance(v, bool)
-                     else (np.nan if pd.isna(v) else _to_number(str(v))))
-        if conv.map(lambda v: v is None).sum() == 0:
-            return pd.to_numeric(conv, errors="coerce")
-    return s.map(lambda v: nfc(v) if isinstance(v, str) else v)
+    low = set(sample.str.lower().unique()[:5])
+    if low and low <= {"true", "false"}:
+        return s.map(lambda v: v if _isnull(v) else str(v).strip().lower() == "true"), None, None
+    if _is_code(name, meaning):
+        return s.map(lambda v: v if _isnull(v) else
+                     (str(int(v)) if isinstance(v, float) and v.is_integer() else nfc(v))), None, None
+    # chuỗi ngày dù tên cột không gợi ý
+    if sample.head(500).str.match(r"^(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s*thg)").mean() > 0.9:
+        conv, _ = _convert_dates(s, sources)
+        if conv is not None:
+            return conv, None, None
+    # số / tiền: thử trên mẫu trước cho nhanh
+    head = non_null.head(300)
+    if head.map(lambda v: to_number(v) is not None).mean() >= 0.9:
+        conv = s.map(lambda v: np.nan if _isnull(v) else to_number(v))
+        bad = conv.map(lambda v: v is None).sum()
+        if bad <= 0.01 * len(non_null):
+            return pd.to_numeric(conv.map(lambda v: np.nan if v is None else v), errors="coerce"), None, \
+                (f"{bad} ô không đọc được số" if bad else None)
+    # số lượng ghi kèm đơn vị
+    if _QTY_HINT.search(_fname(name)) or "so luong" in fold(meaning):
+        r = _split_qty(s)
+        if r is not None:
+            return r[0], r[1], None
+    return s.map(lambda v: nfc(v) if isinstance(v, str) else v), None, None
+
+# --------------------------------------------------------------------------- điền xuống theo nhóm (§8)
+
+
+_ID_NAME = re.compile(r"^(ma (don|hoa don|hd|bill|phieu|chung tu|don hang)|so (phieu|ct|hd|hoa don|chung tu)|"
+                      r"hd|bill|don so|order id|stt|ma bill|ma don)$")
+
+
+def _ffill_groups(df: pd.DataFrame, meanings: dict) -> list:
+    """Điền xuống các cột cấp đơn bị để trống ở dòng sau của cùng một nhóm. Trả về tên cột đã điền."""
+    cols = [c for c in df.columns if c != "_nguon"]
+    if len(df) < 3:
+        return []
+    blanks = {c: df[c].isna() | (df[c].astype(str).str.strip() == "") for c in cols}
+    share = {c: blanks[c].mean() for c in cols}
+    cand = [c for c in cols if 0.02 < share[c] < 0.95]
+    if not cand:
+        return []
+    clusters = []
+    for c in cand:                                     # gom các cột có cùng mẫu ô trống
+        for cl in clusters:
+            if (blanks[c] == blanks[cl[0]]).mean() >= 0.98:
+                cl.append(c)
+                break
+        else:
+            clusters.append([c])
+
+    def id_like(c):
+        return bool(_ID_NAME.match(_fname(c))) or fold(meanings.get(c, "")).startswith(("ma don", "so thu tu don"))
+
+    full_ids = [c for c in cols if id_like(c) and share[c] <= 0.02]
+    src = df["_nguon"] if "_nguon" in df else pd.Series("", index=df.index)
+    done = []
+    for cl in clusters:
+        mask = blanks[cl[0]]
+        if mask.iloc[0]:
+            continue
+        if any(id_like(c) for c in cl):
+            ok = True                                  # chính mã đơn bị trống ở dòng sau -> dòng tiếp nối
+        elif full_ids:
+            # chỉ điền khi trong mỗi nhóm cùng mã, dòng đầu có giá trị và các dòng sau trống
+            idc = df[full_ids[0]].astype(str)
+            gid = ((idc != idc.shift()) | (src != src.shift())).cumsum()
+            g = pd.DataFrame({"gid": gid, "blank": mask})
+            gg = g.groupby("gid")["blank"].agg(["first", "sum", "size"])
+            gg = gg[gg["sum"] > 0]
+            ok = len(gg) > 0 and ((~gg["first"]) & (gg["sum"] == gg["size"] - 1)).mean() >= 0.9
+        else:
+            ok = len(cl) >= 2
+        if not ok:
+            continue
+        for c in cl:
+            ser = df[c].where(~blanks[c])
+            df[c] = ser.groupby(src.values).ffill()
+        done.extend(cl)
+    return done
+
 
 # --------------------------------------------------------------------------- README
 
 
-def parse_readme(text: str) -> dict:
-    """Lấy nghĩa cột từ README: {tên file hoặc '*': {tên cột: nghĩa}}."""
-    out, current = {}, "*"
+def parse_readme(text: str):
+    """-> (nghĩa cột {file|'*': {cột: nghĩa}}, ghi chú dạng chữ, ngày cuối dữ liệu)."""
+    meanings, notes, current = {}, [], None
     for line in text.splitlines():
-        m = re.match(r"^#+\s*Cột trong\s+`?([^`]+?)`?\s*$", line.strip())
-        if m:
-            current = m.group(1).strip()
+        s = line.strip()
+        h = re.match(r"^#+\s*(.*)$", s)
+        if h:
+            m = re.match(r"^Cột trong\s+`?([^`]+?)`?\s*$", h.group(1).strip())
+            current = m.group(1).strip() if m else None
+            if not m:
+                notes.append(line)
             continue
         m = re.match(r"^\s*-\s*\*\*(.+?)\*\*\s*:\s*(.+)$", line)
-        if m:
-            out.setdefault(current, {})[nfc(m.group(1))] = m.group(2).strip()
-    return out
+        if current is not None:
+            if m:
+                meanings.setdefault(current, {})[nfc(m.group(1))] = m.group(2).strip()
+            elif s:
+                meanings.setdefault(current, {})  # dòng khác trong mục cột: bỏ qua
+            continue
+        notes.append(line)
+        if m:                                          # gạch đầu dòng trong ghi chú: có thể là nghĩa cột
+            meanings.setdefault("*", {})[nfc(m.group(1))] = m.group(2).strip()
+    end = None
+    m = re.search(r"có đến hết (?:ngày )?(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    if m:
+        end = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    notes_txt = re.sub(r"\n{3,}", "\n\n", "\n".join(notes)).strip()
+    return meanings, notes_txt, end
 
 # --------------------------------------------------------------------------- Business
 
@@ -246,19 +515,23 @@ def parse_readme(text: str) -> dict:
 @dataclass
 class Business:
     path: str
-    tables: dict = field(default_factory=dict)       # tên bảng -> DataFrame
-    sources: dict = field(default_factory=dict)      # tên bảng -> danh sách "file|sheet"
+    tables: dict = field(default_factory=dict)
+    sources: dict = field(default_factory=dict)
     readme: str = ""
-    col_meaning: dict = field(default_factory=dict)  # tên bảng -> {cột: nghĩa}
+    notes: str = ""
+    data_end: object = None
+    col_meaning: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     load_seconds: float = 0.0
 
-    def schema_text(self, n_samples: int = 3, max_cols: int = 60) -> str:
-        """Mô tả ngắn gọn các bảng cho LLM: tên cột, kiểu, ví dụ giá trị, nghĩa theo README."""
+    def schema_text(self, n_samples: int = 3, max_cols: int = 60, with_notes: bool = True) -> str:
         lines = []
+        if with_notes and self.notes:
+            lines += ["## Ghi chú của cửa hàng (README)", self.notes, ""]
+        lines.append("## Các bảng dữ liệu (pandas DataFrame, tên bảng là khoá của dict `tables`)")
         for name, df in self.tables.items():
             srcs = self.sources.get(name, [])
-            src_txt = srcs[0] if len(srcs) == 1 else f"{len(srcs)} mảnh, vd {srcs[0]}"
+            src_txt = srcs[0] if len(srcs) == 1 else f"{len(srcs)} mảnh ghép lại, vd {srcs[0]}"
             lines.append(f"### Bảng `{name}`: {len(df):,} dòng (nguồn: {src_txt})")
             meaning = self.col_meaning.get(name, {})
             for col in list(df.columns)[:max_cols]:
@@ -266,13 +539,22 @@ class Business:
                     continue
                 s = df[col]
                 kind = ("ngày" if pd.api.types.is_datetime64_any_dtype(s) else
+                        "đúng/sai" if pd.api.types.is_bool_dtype(s) else
                         "số" if pd.api.types.is_numeric_dtype(s) else "chữ")
+                null = s.isna().mean()
+                if null >= 0.999:
+                    lines.append(f"- `{col}` (trống hoàn toàn)")
+                    continue
                 vals = s.dropna().unique()[:n_samples]
                 ex = ", ".join(_fmt(v) for v in vals)
-                null = s.isna().mean()
                 extra = f"; trống {null:.0%}" if null > 0.05 else ""
                 if kind == "ngày" and s.notna().any():
                     extra += f"; từ {s.min():%Y-%m-%d} đến {s.max():%Y-%m-%d}"
+                if kind == "chữ":
+                    nu = s.nunique()
+                    if nu <= 12:
+                        ex = ", ".join(_fmt(v) for v in s.dropna().unique()[:12])
+                        extra += f"; {nu} giá trị khác nhau"
                 m = meaning.get(col)
                 lines.append(f"- `{col}` ({kind}{extra}){' = ' + m if m else ''} | vd: {ex}")
             lines.append("")
@@ -283,8 +565,8 @@ class Business:
 
 
 def _fmt(v):
-    if isinstance(v, (pd.Timestamp,)) or hasattr(v, "strftime"):
-        return v.strftime("%Y-%m-%d %H:%M") if getattr(v, "hour", 0) or getattr(v, "minute", 0) else v.strftime("%Y-%m-%d")
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return v.strftime("%Y-%m-%d %H:%M") if (v.hour or v.minute) else v.strftime("%Y-%m-%d")
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
     t = str(v)
@@ -298,7 +580,7 @@ def _cache_key(path: str) -> str:
             p = os.path.join(root, f)
             st = os.stat(p)
             h.update(f"{p}|{st.st_size}|{int(st.st_mtime)}".encode())
-    h.update(b"v1")
+    h.update(LOADER_VERSION.encode())
     return h.hexdigest()
 
 
@@ -307,24 +589,26 @@ def load_business(path: str, use_cache: bool = True) -> Business:
     key = _cache_key(path)
     cache_file = os.path.join(CACHE_DIR, f"{os.path.basename(os.path.normpath(path))}_{key}.pkl")
     if use_cache and os.path.exists(cache_file):
-        with open(cache_file, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(cache_file, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
 
     biz = Business(path=path)
     rp = os.path.join(path, "README.md")
     if os.path.exists(rp):
         with open(rp, encoding="utf-8", errors="replace") as f:
             biz.readme = f.read()
-    meanings = parse_readme(biz.readme)
+    meanings, biz.notes, biz.data_end = parse_readme(biz.readme)
 
-    parts = []   # (tên bảng, file, sheet, DataFrame)
+    parts = []
     for fname in sorted(os.listdir(path)):
         fp = os.path.join(path, fname)
         ext = fname.lower().rsplit(".", 1)[-1]
         try:
             if ext == "csv":
-                df = _frame_from_raw(_read_csv_raw(fp))
-                parts.append((_table_name(fname, None, 1), fname, None, df))
+                parts.append((_table_name(fname, None, 1), fname, None, _frame_from_raw(_read_csv_raw(fp))))
             elif ext in ("xlsx", "xlsm", "xls"):
                 sheets = _read_excel_raw(fp)
                 for sh, raw in sheets.items():
@@ -340,22 +624,20 @@ def load_business(path: str, use_cache: bool = True) -> Business:
                         parts.append((t, fname, t, pd.read_sql_query(f'SELECT * FROM "{t}"', con)))
                 finally:
                     con.close()
-        except Exception as e:                # không dừng cả shop vì 1 file lỗi
+        except Exception as e:
             biz.warnings.append(f"Lỗi đọc {fname}: {e}")
 
-    # gom các mảnh cùng tên bảng + cùng bộ cột
     groups: dict = {}
     for tname, fname, sh, df in parts:
         if df.empty:
             continue
         colkey = tuple(sorted(fold(c) for c in df.columns))
-        gkey = (tname, colkey)
-        groups.setdefault(gkey, []).append((fname, sh, df))
+        groups.setdefault((tname, colkey), []).append((fname, sh, df))
 
     used = {}
     for (tname, _), items in groups.items():
         name = tname
-        if name in used:                      # cùng tên nhưng khác cột -> đặt tên phân biệt
+        if name in used:
             used[name] += 1
             name = f"{tname}_{used[tname]}"
         else:
@@ -363,30 +645,49 @@ def load_business(path: str, use_cache: bool = True) -> Business:
         cols = list(items[0][2].columns)
         frames = []
         for fname, sh, df in items:
-            df = df.copy()
-            # sắp cột theo bảng đầu tiên (so khớp không phân biệt hoa thường/dấu)
             fmap = {fold(c): c for c in df.columns}
-            df = df[[fmap[fold(c)] for c in cols]]
+            df = df[[fmap[fold(c)] for c in cols]].copy()
             df.columns = cols
             df["_nguon"] = f"{fname}|{sh}" if sh is not None else fname
             frames.append(df)
-        table = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
-        for c in table.columns:
-            if c != "_nguon":
-                try:
-                    table[c] = _convert_column(c, table[c])
-                except Exception as e:
-                    biz.warnings.append(f"Không chuyển kiểu được {name}.{c}: {e}")
-        biz.tables[name] = table
-        biz.sources[name] = [f"{f}|{s}" if s is not None else f for f, s, _ in items]
-        # nghĩa cột: theo đúng file trong README, không có thì dùng mục chung
+        table = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0].reset_index(drop=True)
+
+        # nghĩa cột theo README: ưu tiên đúng file, sau đó mục chung (chỉ khi khớp tên cột)
         m = {}
         for fname, _, _ in items:
             m.update(meanings.get(fname, {}))
-        for k, v in meanings.get("*", {}).items():
-            m.setdefault(k, v)
         fm = {fold(k): v for k, v in m.items()}
-        biz.col_meaning[name] = {c: fm[fold(c)] for c in table.columns if fold(c) in fm}
+        gm = {fold(k): v for k, v in meanings.get("*", {}).items()}
+        col_mean = {}
+        for c in table.columns:
+            if fold(c) in fm:
+                col_mean[c] = fm[fold(c)]
+            elif fold(c) in gm:
+                col_mean[c] = gm[fold(c)]
+
+        filled = _ffill_groups(table, col_mean) if "_nguon" in table else []
+        if filled:
+            biz.warnings.append(f"{name}: đã điền xuống theo nhóm (rulebook §8) các cột {filled}")
+
+        extra_cols = {}
+        for c in list(table.columns):
+            if c == "_nguon":
+                continue
+            try:
+                new, unit, note = _convert_column(c, table[c], table["_nguon"], col_mean.get(c, ""))
+                table[c] = new
+                if unit is not None:
+                    extra_cols[f"{c} (đơn vị ghi kèm)"] = unit
+                if note:
+                    biz.warnings.append(f"{name}.{c}: {note}")
+            except Exception as e:
+                biz.warnings.append(f"Không chuyển kiểu được {name}.{c}: {e}")
+        for k, v in extra_cols.items():
+            table[k] = v
+            col_mean[k] = "phần chữ ghi kèm sau con số ở cột số lượng (vd 'chai', 'bao 25kg'); trống = không ghi"
+        biz.tables[name] = table
+        biz.sources[name] = [f"{f}|{s}" if s is not None else f for f, s, _ in items]
+        biz.col_meaning[name] = col_mean
 
     biz.load_seconds = round(time.time() - t0, 1)
     if use_cache:
@@ -404,5 +705,5 @@ if __name__ == "__main__":
     b = load_business(sys.argv[1], use_cache=False)
     print(f"Đọc xong trong {b.load_seconds}s: {b.summary()}")
     for w in b.warnings:
-        print("CẢNH BÁO:", w)
+        print("GHI CHÚ:", w)
     print(b.schema_text())
