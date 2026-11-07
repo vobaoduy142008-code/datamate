@@ -2,7 +2,10 @@
 Chấm điểm local mô phỏng luật DataMate (Penalized Accuracy: đúng +1, abstain 0, sai -1).
 
 Cách dùng (chạy trong thư mục dự án):
-    python scorer.py train/answers.jsonl outputs/submission.jsonl
+    python src/scorer.py data/train/answers.jsonl outputs/run/submission.jsonl
+    python src/scorer.py data/train/answers.jsonl outputs/run/submission.jsonl --subset --show
+      --subset : chỉ chấm các câu CÓ trong file nộp (khi chạy thử một phần, vd --sample 30)
+      --show   : in chi tiết từng câu sai (câu hỏi, đáp án của mình, đáp án đúng)
 
 - File đáp án dùng ĐÚNG định dạng answers.jsonl của BTC:
     {"id": "...", "type": "string", "answer": "Xi măng Hà Tiên PCB40 bao 50kg", "alias": ["SP0001"]}
@@ -163,8 +166,10 @@ def load(path):
         return {d["id"]: d for d in (json.loads(l) for l in f if l.strip())}
 
 
-def main(ref_path, sub_path):
+def main(ref_path, sub_path, subset=False, show=False):
     refs, subs = load(ref_path), load(sub_path)
+    if subset:
+        refs = {k: v for k, v in refs.items() if k in subs}
     stats = Counter()
     wrong = []
     for qid, ref in refs.items():
@@ -185,7 +190,19 @@ def main(ref_path, sub_path):
         print(f"  {t:13s} {d[1]:5d} / {d[0]:5d} / {d[-1]:5d}")
     if wrong:
         print("Một số câu sai:", ", ".join(wrong[:20]))
+    if show and wrong:
+        import os
+        qpath = os.path.join(os.path.dirname(ref_path), "questions.jsonl")
+        qs = load(qpath) if os.path.exists(qpath) else {}
+        print("\n===== CHI TIẾT CÂU SAI =====")
+        for qid in wrong:
+            q = qs.get(qid, {})
+            p, r = subs.get(qid, {}), refs[qid]
+            print(f"- {qid} [{q.get('business_id', '')}] hôm nay {q.get('as_of_date', '')}: {q.get('question', '')}")
+            print(f"    mình : {p.get('type')} {json.dumps(p.get('answer'), ensure_ascii=False)[:200]}")
+            print(f"    đúng : {r['type']} {json.dumps(r.get('answer'), ensure_ascii=False)[:200]}")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    main(args[0], args[1], subset="--subset" in sys.argv, show="--show" in sys.argv)

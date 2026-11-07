@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 CACHE_DIR = os.environ.get("DATAMATE_CACHE", "/tmp/datamate_cache")
-LOADER_VERSION = "v2.3"
+LOADER_VERSION = "v2.4"
 
 # --------------------------------------------------------------------------- tiện ích chữ
 
@@ -826,7 +826,9 @@ def load_business(path: str, use_cache: bool = True) -> Business:
             biz.dup_rows[name] = n_dup
             has_id = any(_ID_NAME.match(_fname(c)) or fold(col_mean.get(c, "")).startswith("ma don") for c in data_cols)
             if has_id:
-                biz.warnings.append(f"{name}: {n_dup} dòng trùng y hệt dòng khác cùng mã đơn (rulebook §8: tính 1 lần; bộ đọc KHÔNG tự xoá)")
+                # rulebook §8: hai dòng của cùng một đơn giống nhau ở mọi ô là lỗi xuất file, tính một lần
+                table = table.drop_duplicates(subset=data_cols).reset_index(drop=True)
+                biz.warnings.append(f"{name}: đã bỏ {n_dup} dòng trùng y hệt dòng khác cùng mã đơn (rulebook §8: tính 1 lần)")
             else:
                 biz.warnings.append(f"{name}: {n_dup} dòng giống hệt nhau nhưng bảng KHÔNG có mã đơn - có thể là các lần bán khác nhau, không gộp")
         biz.tables[name] = table
