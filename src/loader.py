@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 CACHE_DIR = os.environ.get("DATAMATE_CACHE", "/tmp/datamate_cache")
-LOADER_VERSION = "v2"
+LOADER_VERSION = "v2.3"
 
 # --------------------------------------------------------------------------- tiện ích chữ
 
@@ -114,7 +114,16 @@ def _clean_columns(values) -> list[str]:
     return cols
 
 
-_TOTAL_RE = re.compile(r"^(tong cong|tong|cong|total|sum)\b")
+# Dòng tổng/cộng chèn giữa dữ liệu: "Tổng ngày 01/01", "Cộng ngày 01/01/2025", "tổng 01/05", "Tổng tháng",
+# "Cộng tháng 05/2025", "Cộng", "tong cong". So khớp CÓ DẤU (chữ thường, NFC) để không nhầm họ "Tống"
+# (Tống Thắng, Tống Hằng...) hay "Công ty ...". Chữ không dấu chỉ nhận khi theo sau là ngày/tháng/số.
+_TOT_TAIL = r"(\s*$|\s*[:\-(=]|\s*\d|\s+(cộng|ngày|tháng|tuần|quý|năm|kỳ|ca|tiền|doanh thu|số|hóa đơn|hoá đơn|đơn|phiếu|bill|giá trị|thanh toán)(\s|$|:))"
+_TOTAL_RE = re.compile(r"^(tổng cộng|tổng|cộng)" + _TOT_TAIL + r"|^(tong cong|tong|cong)(\s*$|\s*[:\-(=]|\s*\d|\s+(cong|ngay|thang|tuan|quy|nam|ky)(\s|$|:))"
+                       r"|^(grand total|total|sum)(\s*$|\s*[:=])")
+
+
+def _is_total_text(x) -> bool:
+    return isinstance(x, str) and to_number(x) is None and bool(_TOTAL_RE.match(nfc(x).lower()))
 
 
 def _frame_from_raw(raw: pd.DataFrame) -> pd.DataFrame:
@@ -133,14 +142,17 @@ def _frame_from_raw(raw: pd.DataFrame) -> pd.DataFrame:
         again = df[cand].apply(lambda r: [fold(x) for x in r.tolist()] == header_fold, axis=1)
         df = df.drop(again[again].index)
     n_filled = df.notna().sum(axis=1)
-    sparse = df[n_filled <= 0.6 * df.shape[1]]
+    # dòng tổng luôn thiếu vài ô (mã đơn, ngày...): xét các dòng có ít nhất 1 ô trống và <=80% ô có dữ liệu
+    sparse = df[(n_filled < df.shape[1]) & (n_filled <= 0.8 * df.shape[1])]
     if len(sparse):
-        def is_total(r):
-            v = next((x for x in r.dropna() if isinstance(x, str)), None)
-            return bool(v and _TOTAL_RE.match(fold(v)))
-        tot = sparse.apply(is_total, axis=1)
+        tot = sparse.apply(lambda r: any(_is_total_text(x) for x in r.dropna()), axis=1)
         df = df.drop(tot[tot].index)
-    return df.reset_index(drop=True)
+        n_total = int(tot.sum())
+    else:
+        n_total = 0
+    df = df.reset_index(drop=True)
+    df.attrs["n_total"] = n_total
+    return df
 
 # --------------------------------------------------------------------------- gom mảnh thành bảng
 
@@ -185,8 +197,13 @@ def _year_month_hint(source: str):
 
 _CODE_HINT = re.compile(
     r"(^|[\s_(])(ma|id|code|sku|barcode|ean|so dien thoai|dien thoai|sdt|so dt|phone|di dong|imei|"
-    r"bien so|so ct|so phieu|so hd|so hoa don|hd|bill|cccd|cmnd|mst|ma so thue|so the|lo|ma lo|"
+    r"bien so|so ct|so phieu|so hd|so hoa don|cccd|cmnd|mst|ma so thue|so the|ma lo|so lo|"
     r"so chung tu|ma vach)([\s_)]|$)")
+# từ ngắn dễ trùng ("Giảm giá HĐ", "Tổng bill"): chỉ coi là mã khi đứng MỘT MÌNH làm tên cột
+_CODE_EXACT = re.compile(r"^(hd|bill|lo|don|ma)$")
+# tên cột tiền/số lượng: không bao giờ là mã (trừ khi bắt đầu bằng "mã")
+_MONEY_WORD = re.compile(r"(^|\s)(tien|gia|tong|giam|chiet khau|thanh toan|phai thu|phai tra|con no|du no|"
+                         r"no|tra|thu|chi|so luong|sl|vat|thue|phi|coc|luong)(\s|$)")
 _DATE_HINT = re.compile(r"(^|\s)(ngay|thoi gian|thoi diem|date|time|han|hsd|sinh nhat|tu ngay|den ngay|"
                         r"ngay gio|tao luc|ngaylap|ngayban|ngay ban)(\s|$)")
 _NOT_DATE = re.compile(r"(so ngay|\(ngay\)|ky han|han no \(|han gop \(|gio$|^gio )")
@@ -194,11 +211,51 @@ _QTY_HINT = re.compile(r"(^|\s)(so luong|sl|slg|sluong|soluong|s\.l|qty|so luong
 
 
 def _fname(name):
+    """Tên cột -> dạng so khớp: 'SoDienThoai' -> 'so dien thoai', 'ma_kh' -> 'ma kh'."""
+    name = str(name)
+    name = "".join(" " + ch if i and ch.isupper() and name[i - 1].islower() else ch for i, ch in enumerate(name))
     return fold(name).replace("_", " ")
 
 
 def _is_code(name, meaning=""):
-    return bool(_CODE_HINT.search(_fname(name)) or re.search(r"^(ma|so dien thoai|imei|bien so)(\s|$)", fold(meaning)))
+    n = _fname(name)
+    if _CODE_EXACT.match(n):
+        return True
+    if _CODE_HINT.search(n):
+        if _MONEY_WORD.search(n) and not re.match(r"^(ma|so dien thoai|dien thoai|sdt|imei|mst|ma so thue)(\s|$)", n):
+            return False
+        return True
+    return bool(re.search(r"^(ma|so dien thoai|imei|bien so)(\s|$)", fold(meaning)))
+
+
+_PHONE_HINT = re.compile(r"(^|\s)(so dien thoai|dien thoai|sdt|so dt|phone|di dong|mobile|tel)(\s|$)")
+_EXCEL_ERR = {"#value!", "#n/a", "#ref!", "#div/0!", "#name?", "#null!", "#num!"}
+
+
+def _is_phone(name, meaning=""):
+    return bool(_PHONE_HINT.search(_fname(name)) or re.match(r"^so dien thoai", fold(meaning)))
+
+
+def _norm_phone(v):
+    """974532329 / 974532329.0 / '0974 532 329' -> '0974532329' (số di động VN 10 chữ số, mất số 0 đầu khi lưu dạng số)."""
+    if _isnull(v):
+        return v
+    if isinstance(v, (float, np.floating)) and float(v).is_integer():
+        v = int(v)
+    t = re.sub(r"^(\d+)\.0+$", r"\1", nfc(v))          # '974532329.0' (CSV ghi số thực)
+    d = re.sub(r"[\s.\-()]", "", t)
+    if re.fullmatch(r"\+?84\d{9}", d):
+        return "0" + d[-9:]
+    if re.fullmatch(r"[1-9]\d{8}", d):
+        return "0" + d
+    return d if re.fullmatch(r"\d{9,11}", d) else t
+
+
+def _clean_text(v):
+    if not isinstance(v, str):
+        return v
+    t = re.sub(r"\s+", " ", nfc(v)).strip()
+    return np.nan if (not t or t.lower() in _EXCEL_ERR) else t
 
 
 def _is_date_name(name, meaning=""):
@@ -316,8 +373,13 @@ def _parse_date_value(v, year_hint):
         return (None, None)
 
 
-def _convert_dates(s: pd.Series, sources: pd.Series):
-    """Chuyển cột sang datetime. Trả về (Series mới, số ô phải đoán thứ tự ngày/tháng) hoặc (None, 0)."""
+# cột ngày có thể nằm ở tương lai (hạn, hết hạn, dự kiến...): không dùng mốc "dữ liệu đến hết"
+_FUTURE_DATE = re.compile(r"(^|\s)(han|hsd|het han|den ngay|du kien|hen|bao hanh|tai kham|ngay phai tra|ngay tra|lich)(\s|$)")
+
+
+def _convert_dates(s: pd.Series, sources: pd.Series, data_end=None):
+    """Chuyển cột sang datetime. Trả về (Series mới, số ô phải đoán thứ tự ngày/tháng) hoặc (None, 0).
+    data_end: ngày cuối dữ liệu (README). Ô mơ hồ mà 1 cách đọc vượt quá mốc này thì chọn cách còn lại."""
     idx = s.index
     vals = s.tolist()
     src = sources.tolist() if sources is not None else [""] * len(vals)
@@ -349,9 +411,12 @@ def _convert_dates(s: pd.Series, sources: pd.Series):
         ref = sure.groupby(grp.values).ffill()
         ref = ref.fillna(sure.groupby(grp.values).bfill())
         choose_alt = []
+        end = pd.Timestamp(data_end) + pd.Timedelta(days=1) if data_end is not None else None
         for i in idx[amb]:
             d1, d2, hm, r = p[i], a[i], hint_m[i], ref[i]
-            if hm and d1.month != d2.month and (d1.month == hm) != (d2.month == hm):
+            if end is not None and (d1 >= end) != (d2 >= end):
+                choose_alt.append(d1 >= end)           # cách đọc kia vượt quá ngày cuối dữ liệu
+            elif hm and d1.month != d2.month and (d1.month == hm) != (d2.month == hm):
                 choose_alt.append(d2.month == hm)
             elif not pd.isna(r):
                 choose_alt.append(abs((d2 - r).days) < abs((d1 - r).days))
@@ -378,7 +443,7 @@ def _split_qty(s: pd.Series):
     return num, unit
 
 
-def _convert_column(name, s: pd.Series, sources: pd.Series, meaning: str = ""):
+def _convert_column(name, s: pd.Series, sources: pd.Series, meaning: str = "", data_end=None):
     """-> (Series đã chuyển, cột phụ hoặc None, ghi chú hoặc None)."""
     if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_bool_dtype(s):
         return s, None, None
@@ -386,10 +451,13 @@ def _convert_column(name, s: pd.Series, sources: pd.Series, meaning: str = ""):
     if non_null.empty:
         return s, None, None
     if _is_date_name(name, meaning):
-        conv, n_amb = _convert_dates(s, sources)
+        fut = _FUTURE_DATE.search(_fname(name)) or _FUTURE_DATE.search(fold(meaning))
+        conv, n_amb = _convert_dates(s, sources, None if fut else data_end)
         if conv is not None:
-            note = f"{n_amb} ô ngày mơ hồ ngày/tháng, đã chọn theo dòng lân cận" if n_amb else None
+            note = f"{n_amb} ô ngày mơ hồ ngày/tháng, đã chọn theo tên sheet/ngày cuối dữ liệu/dòng lân cận" if n_amb else None
             return conv, None, note
+    if _is_phone(name, meaning):
+        return s.astype(object).map(_norm_phone), None, None
     if pd.api.types.is_numeric_dtype(s):
         return s, None, None
     s = s.astype(object)
@@ -399,10 +467,10 @@ def _convert_column(name, s: pd.Series, sources: pd.Series, meaning: str = ""):
         return s.map(lambda v: v if _isnull(v) else str(v).strip().lower() == "true"), None, None
     if _is_code(name, meaning):
         return s.map(lambda v: v if _isnull(v) else
-                     (str(int(v)) if isinstance(v, float) and v.is_integer() else nfc(v))), None, None
+                     (str(int(v)) if isinstance(v, float) and v.is_integer() else _clean_text(str(v)))), None, None
     # chuỗi ngày dù tên cột không gợi ý
     if sample.head(500).str.match(r"^(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s*thg)").mean() > 0.9:
-        conv, _ = _convert_dates(s, sources)
+        conv, _ = _convert_dates(s, sources, data_end)
         if conv is not None:
             return conv, None, None
     # số / tiền: thử trên mẫu trước cho nhanh
@@ -418,17 +486,18 @@ def _convert_column(name, s: pd.Series, sources: pd.Series, meaning: str = ""):
         r = _split_qty(s)
         if r is not None:
             return r[0], r[1], None
-    return s.map(lambda v: nfc(v) if isinstance(v, str) else v), None, None
+    return s.map(_clean_text), None, None
 
 # --------------------------------------------------------------------------- điền xuống theo nhóm (§8)
 
 
-_ID_NAME = re.compile(r"^(ma (don|hoa don|hd|bill|phieu|chung tu|don hang)|so (phieu|ct|hd|hoa don|chung tu)|"
-                      r"hd|bill|don so|order id|stt|ma bill|ma don)$")
+_ID_NAME = re.compile(r"^(ma (don|hoa don|hd|bill|phieu|chung tu|don hang|giao dich|so don)|"
+                      r"so (phieu|ct|hd|hoa don|chung tu|don|bill)|hd|bill|don so|order id|order|invoice|stt|ma bill|ma don)$")
 
 
-def _ffill_groups(df: pd.DataFrame, meanings: dict) -> list:
-    """Điền xuống các cột cấp đơn bị để trống ở dòng sau của cùng một nhóm. Trả về tên cột đã điền."""
+def _ffill_groups(df: pd.DataFrame, meanings: dict, samples: list = None) -> list:
+    """Điền xuống các cột cấp đơn bị để trống ở dòng sau của cùng một nhóm. Trả về tên cột đã điền.
+    samples (nếu truyền vào): nhận vài dòng mẫu TRƯỚC khi điền, để người kiểm tra xem lại."""
     cols = [c for c in df.columns if c != "_nguon"]
     if len(df) < 3:
         return []
@@ -470,10 +539,66 @@ def _ffill_groups(df: pd.DataFrame, meanings: dict) -> list:
             ok = len(cl) >= 2
         if not ok:
             continue
+        if samples is not None:
+            pos = int(np.argmax(mask.values))         # dòng trống đầu tiên của cụm
+            lo, hi = max(0, pos - 2), min(len(df), pos + 3)
+            show = list(dict.fromkeys(full_ids[:1] + cl + [c for c in cols if c not in cl][:4]))
+            samples.append((cl, df.iloc[lo:hi][show].copy()))
         for c in cl:
             ser = df[c].where(~blanks[c])
             df[c] = ser.groupby(src.values).ffill()
         done.extend(cl)
+
+    # Bước 2: cột "cấp đơn" chỉ ghi ở một số dòng của đơn (vd dòng Voucher/Phí ship để trống Ngày, Khách).
+    # Điền trong cùng mã đơn nếu có BẰNG CHỨNG cột này là cấp đơn: ở >=20 đơn có >=2 ô có giá trị,
+    # và >=99% các đơn đó mọi ô có giá trị đều giống nhau. Cột cấp dòng (đơn giá, SL) không qua được.
+    ids = sorted([c for c in cols if id_like(c) and df[c].notna().mean() >= 0.98],
+                 key=lambda c: _fname(c) == "stt")             # ưu tiên mã đơn thật, STT để sau
+    if ids:
+        idc = df[ids[0]].astype(str)
+        gid = ((idc != idc.shift()) | (src != src.shift())).cumsum().values
+        for c in cand:
+            if c in done or c in ids:
+                continue
+            b = df[c].isna() | (df[c].astype(str).str.strip() == "")
+            if not b.any():
+                continue
+            vals = df[c].where(~b)
+            if _is_date_name(c, meanings.get(c, "")):
+                # cùng một ngày có thể ghi nhiều kiểu trong một đơn (01/01/2026, 1 thg 1 2026, 46023, 1/1):
+                # mỗi ô -> tập các ngày có thể (ngày/tháng và tháng/ngày); đơn "nhất quán" nếu các tập có phần chung
+                hints = {}
+                inter, cnt = {}, {}
+                for g_, v, so in zip(gid, vals.tolist(), src.tolist()):
+                    if _isnull(v):
+                        continue
+                    if so not in hints:
+                        hints[so] = _year_month_hint(so)[0]
+                    d1, d2 = _parse_date_value(v, hints[so])
+                    cs = frozenset(x.date() for x in (d1, d2) if x is not None) or frozenset([fold(v)])
+                    inter[g_] = inter[g_] & cs if g_ in inter else cs
+                    cnt[g_] = cnt.get(g_, 0) + 1
+                multi_g = [g_ for g_, n in cnt.items() if n >= 2]
+                if len(multi_g) < 20 or sum(1 for g_ in multi_g if inter[g_]) / len(multi_g) < 0.99:
+                    continue
+            else:
+                key = vals.map(lambda v: v if _isnull(v) else fold(v))
+                g = key.groupby(gid)
+                cnt, nun = g.count(), g.nunique()
+                multi = cnt >= 2
+                if multi.sum() < 20 or (nun[multi] == 1).mean() < 0.99:
+                    continue
+            new = vals.groupby(gid).ffill().groupby(gid).bfill()
+            changed = new.notna() & vals.isna()
+            if not changed.any():
+                continue                               # đơn nào trống thì trống cả đơn (vd khách lẻ): không có gì để điền
+            if samples is not None:
+                pos = int(np.argmax(changed.values))
+                lo, hi = max(0, pos - 2), min(len(df), pos + 3)
+                show = list(dict.fromkeys(ids[:1] + [c] + [x for x in cols if x != c][:5]))
+                samples.append(([c], df.iloc[lo:hi][show].copy()))
+            df[c] = new
+            done.append(c)
     return done
 
 
@@ -522,6 +647,8 @@ class Business:
     data_end: object = None
     col_meaning: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
+    ffill_samples: dict = field(default_factory=dict)   # {bảng: [(cột đã điền, DataFrame mẫu trước khi điền)]}
+    dup_rows: dict = field(default_factory=dict)        # {bảng: số dòng trùng y hệt (rulebook §8: tính 1 lần)}
     load_seconds: float = 0.0
 
     def schema_text(self, n_samples: int = 3, max_cols: int = 60, with_notes: bool = True) -> str:
@@ -633,6 +760,9 @@ def load_business(path: str, use_cache: bool = True) -> Business:
             continue
         colkey = tuple(sorted(fold(c) for c in df.columns))
         groups.setdefault((tname, colkey), []).append((fname, sh, df))
+        n_tot = df.attrs.get("n_total", 0)
+        if n_tot:
+            biz.warnings.append(f"{fname}{'|' + str(sh) if sh is not None else ''}: đã bỏ {n_tot} dòng tổng/cộng (vd 'Tổng ngày ...')")
 
     used = {}
     for (tname, _), items in groups.items():
@@ -665,16 +795,18 @@ def load_business(path: str, use_cache: bool = True) -> Business:
             elif fold(c) in gm:
                 col_mean[c] = gm[fold(c)]
 
-        filled = _ffill_groups(table, col_mean) if "_nguon" in table else []
+        samples = []
+        filled = _ffill_groups(table, col_mean, samples) if "_nguon" in table else []
         if filled:
             biz.warnings.append(f"{name}: đã điền xuống theo nhóm (rulebook §8) các cột {filled}")
+            biz.ffill_samples[name] = samples
 
         extra_cols = {}
         for c in list(table.columns):
             if c == "_nguon":
                 continue
             try:
-                new, unit, note = _convert_column(c, table[c], table["_nguon"], col_mean.get(c, ""))
+                new, unit, note = _convert_column(c, table[c], table["_nguon"], col_mean.get(c, ""), biz.data_end)
                 table[c] = new
                 if unit is not None:
                     extra_cols[f"{c} (đơn vị ghi kèm)"] = unit
@@ -685,6 +817,18 @@ def load_business(path: str, use_cache: bool = True) -> Business:
         for k, v in extra_cols.items():
             table[k] = v
             col_mean[k] = "phần chữ ghi kèm sau con số ở cột số lượng (vd 'chai', 'bao 25kg'); trống = không ghi"
+        data_cols = [c for c in table.columns if c != "_nguon"]
+        try:
+            n_dup = int(table.duplicated(subset=data_cols).sum())
+        except TypeError:
+            n_dup = 0
+        if n_dup:
+            biz.dup_rows[name] = n_dup
+            has_id = any(_ID_NAME.match(_fname(c)) or fold(col_mean.get(c, "")).startswith("ma don") for c in data_cols)
+            if has_id:
+                biz.warnings.append(f"{name}: {n_dup} dòng trùng y hệt dòng khác cùng mã đơn (rulebook §8: tính 1 lần; bộ đọc KHÔNG tự xoá)")
+            else:
+                biz.warnings.append(f"{name}: {n_dup} dòng giống hệt nhau nhưng bảng KHÔNG có mã đơn - có thể là các lần bán khác nhau, không gộp")
         biz.tables[name] = table
         biz.sources[name] = [f"{f}|{s}" if s is not None else f for f, s, _ in items]
         biz.col_meaning[name] = col_mean

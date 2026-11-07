@@ -100,6 +100,12 @@ def main():
             fo.write(f"Bảng: {biz.summary()}\nDữ liệu đến hết (README): {biz.data_end}\n")
             for f in flags + notes:
                 fo.write("  " + f + "\n")
+            for tname, items in biz.ffill_samples.items():
+                for cl, sample in items:
+                    fo.write(f"\n  [MẪU ĐIỀN XUỐNG] {tname}: cột {cl} - các dòng TRƯỚC khi điền:\n")
+                    with pd.option_context("display.width", 200, "display.max_columns", 12,
+                                           "display.max_colwidth", 25):
+                        fo.write("    " + sample.to_string().replace("\n", "\n    ") + "\n")
             fo.write("\n" + biz.schema_text(with_notes=False) + "\n")
     print(f"\nXong {time.time() - t_all:.0f}s, tổng {n_flags} cờ. Báo cáo: {out_path}")
 
