@@ -4,3 +4,4 @@
 # script chạy trong Linux/Docker luôn dùng xuống dòng LF
 *.sh text eol=lf
 Dockerfile text eol=lf
+*.bat text eol=crlf
