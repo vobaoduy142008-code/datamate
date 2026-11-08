@@ -23,6 +23,7 @@ import math
 import os
 import re
 import signal
+import sys
 import time
 import traceback
 import unicodedata
@@ -386,9 +387,25 @@ def _run(code: str, env: dict):
     buf = io.StringIO()
     err = None
     use_alarm = hasattr(signal, "SIGALRM")
+    old_trace = None
     if use_alarm:
         old = signal.signal(signal.SIGALRM, _alarm)
         signal.alarm(CODE_TIMEOUT)
+    else:
+        # Windows không có SIGALRM: theo dõi từng dòng CỦA CODE MODEL VIẾT (không theo dõi bên trong pandas),
+        # quá giờ thì ném _Timeout -> vòng lặp vô hạn không làm treo cả lần chạy.
+        deadline = time.time() + CODE_TIMEOUT
+
+        def _local(frame, event, arg):
+            if event == "line" and time.time() > deadline:
+                raise _Timeout()
+            return _local
+
+        def _global(frame, event, arg):
+            return _local if frame.f_code.co_filename == "<code>" else None
+
+        old_trace = sys.gettrace()
+        sys.settrace(_global)
     try:
         with contextlib.redirect_stdout(buf):
             exec(compile(code, "<code>", "exec"), env)
@@ -400,6 +417,8 @@ def _run(code: str, env: dict):
         if use_alarm:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old)
+        else:
+            sys.settrace(old_trace)
     out = buf.getvalue()
     if len(out) > OUT_LIMIT:
         out = out[:OUT_LIMIT] + f"\n... (cắt bớt, tổng {len(out)} ký tự; hãy in ít hơn)"
