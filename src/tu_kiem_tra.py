@@ -138,6 +138,10 @@ def test_periods(data):
          len(p) == 1 and str(p[0].meta.get("compare").start) == "2025-07-01", [str(x) for x in p])
     kiem("'từ ngày 1/1 đến hết hôm nay' = 1/1 → hôm nay",
          rng(one("Tính từ ngày 1/1 đến hết hôm nay, doanh thu năm nay?", "2026-06-18")) == ("2026-01-01", "2026-06-18"))
+    p = find_periods("So số lon Red Bull bán ra trong 7 ngày kể từ ngày 05/01/2026, ngày tăng giá, với 7 ngày ngay trước ngày đó", "2026-06-01", cal)
+    kiem("'7 ngày kể từ 05/01/2026' + so với 7 ngày ngay trước",
+         len(p) == 1 and rng(p[0]) == ("2026-01-05", "2026-01-11") and str(p[0].meta["compare"].start) == "2025-12-29",
+         [str(x) for x in p])
     kiem("'tuần trước' một mình vẫn là cả tuần liền trước",
          rng(one("doanh thu tuần trước", "2026-06-18")) == ("2026-06-08", "2026-06-14"))
 
@@ -229,7 +233,7 @@ def test_sales_synthetic():
     # sổ phẳng: trả hàng ghi số âm, ngày trả khác ngày bán; quy đổi theo bảng quy đổi
     so = pd.DataFrame({"Mã phiếu": ["B1", "B1", "B2", "B2"],
                        "Ngày lập": pd.to_datetime(["2025-05-01", "2025-05-01", "2025-05-31", "2025-06-02"]),
-                       "Tên SP": ["Bia T", "Mì H", "Bia T", "Bia T"], "Số lượng hàng": [1.0, 2, 2, -1],
+                       "Tên SP": ["Bia T", "Mì H", "BIA  T", "Bia T"], "Số lượng hàng": [1.0, 2, 2, -1],
                        "DonVi": ["thùng", "gói", "lon", "lon"], "Tiền": [300000.0, 8000, 20000, -10000],
                        "Ghi chú TT": ["xong", "xong", "xong", "trả lại"]})
     qd = pd.DataFrame({"Hàng": ["Bia T"], "ĐV lớn": ["thùng"], "Hệ số QĐ": [24.0]})
@@ -242,6 +246,8 @@ def test_sales_synthetic():
     kiem("đơn có dòng số âm là đơn trả hàng (bỏ cả đơn B2)", ban2.loc[ban2["tinh_dt"], "thanh_tien"].sum() == 308000)
     kiem("dòng trả mang ngày bán của đơn (31/05), không phải ngày trả",
          (ban2.loc[ban2["ma_don"] == "B2", "ngay"] == pd.Timestamp("2025-05-31")).all())
+    kiem("tên hàng nhiều cách viết gom về một (theo bỏ hoa thường/khoảng trắng)",
+         ban2.loc[ban2["ten_hang"].str.lower() == "bia t", "ten_hang"].nunique() == 1)
     kiem("quy đổi: 1 thùng Bia T = 24 lon", ban2["so_luong_co_ban"].tolist()[:2] == [24.0, 2.0], ban2["so_luong_co_ban"].tolist())
 
 

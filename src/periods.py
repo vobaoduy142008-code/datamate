@@ -313,6 +313,20 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     Ngoài ra, nếu câu có 'so với/cùng kỳ/tăng giảm', thêm kỳ so sánh vào meta['compare']."""
     a = _d(as_of)
     s = fold(question)
+    # "N ngày kể từ ngày D (tính cả D) so với N ngày ngay trước D" (hiệu ứng đổi giá): kỳ hỏi + kỳ so sánh riêng
+    mn = re.search(r"(\d+) ngay (?:ke |tinh )?tu (?:ngay )?(?:do|nay|dd|\d)", s)
+    md = re.search(rf"(?:ngay )?{_NUM}/{_NUM}(?:/{_Y})?", s)
+    if mn and md and re.search(r"truoc", s[mn.end():] + s[:mn.start()]):
+        try:
+            n = int(mn[1])
+            dd, mm, yy = int(md[1]), int(md[2]), md[3]
+            d0 = date(int(yy), mm, dd) if yy else (date(a.year, mm, dd) if date(a.year, mm, dd) <= a else date(a.year - 1, mm, dd))
+            if 1 <= n <= 366:
+                cmp = Period(d0 - timedelta(days=n), d0 - timedelta(days=1), "range", f"{n} ngày ngay trước {d0:%d/%m/%Y}")
+                return [Period(d0, d0 + timedelta(days=n - 1), "range", f"{n} ngày kể từ {d0:%d/%m/%Y} (tính cả ngày đó)",
+                               {"compare": cmp})]
+        except ValueError:
+            pass
     found: list[tuple[int, Period]] = []
     taken = []
 

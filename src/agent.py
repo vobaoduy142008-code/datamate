@@ -231,6 +231,7 @@ _BAN_DESC = {
     "don_gia": "đơn giá", "thanh_tien": "thành tiền dòng sau giảm (doanh thu)", "gia_von": "giá vốn 1 đơn vị bán",
     "ma_khach": "mã khách", "ten_khach": "tên khách", "nhom_khach": "nhóm khách", "kenh": "kênh bán",
     "nhan_vien": "mã nhân viên bán", "ten_nhan_vien": "tên nhân viên",
+    "ke_don": "True = thuốc kê đơn", "hoat_chat": "hoạt chất của thuốc (lọc bằng .str.contains)",
 }
 
 
@@ -411,7 +412,11 @@ def _self_check(question, code, tables):
                 "PERIODS[0], PERIODS[1]... đã tính sẵn ở phần CÂU HỎI (kỳ so sánh cũng có sẵn trong PERIODS), không tự tạo.")
     # (b) đếm đơn bằng số dòng
     if "ban_hang_chuan" in code or re.search(r"\bB\[", code):
-        if (re.search(r"\bdon\b|bill|hoa don", q) and "nunique" not in code
+        lit = re.search(r"""\[['"](ten_hang|nhom_hang|nhom_khach|ten_khach|kenh|hoat_chat)['"]\]\s*==\s*['"]""", code)
+        if lit:
+            return (f"Đang so sánh cột '{lit[1]}' bằng == với chữ tự gõ (dễ sai hoa thường, dấu, khoảng trắng). "
+                    f"Hãy dùng match(df['{lit[1]}'], 'tên') thay cho ==, rồi in ra các giá trị khớp để kiểm tra.")
+        if (re.search(r"\bdon\b|bill|hoa don", q)
                 and re.search(r"\.shape\[0\]|\blen\(|\.count\(\)|\.size\b", code)):
             return ("Đếm SỐ ĐƠN phải đếm mã đơn khác nhau: df['ma_don'].nunique(), không đếm số dòng "
                     "(len / shape[0] / count), vì một đơn có nhiều dòng hàng.")

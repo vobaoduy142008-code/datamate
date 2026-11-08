@@ -23,13 +23,14 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 
 import numpy as np
 import pandas as pd
 
 from loader import fold
 
-SALES_VERSION = "s2"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
+SALES_VERSION = "s4"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
 
 # ----------------------------------------------------------------------------- trạng thái đơn (rulebook §8)
 ST_HUY = re.compile(r"\bhuy\b|cancel|khong giao duoc|giao that bai|\bthat bai")   # \b: "chuyen" có chứa "huy"!
@@ -140,6 +141,48 @@ def _is_import(tname, roles, meanings):
         return True
     m = " ".join(fold(v) for v in meanings.values())
     return "ma phieu nhap" in m
+
+
+def _name_key(v):
+    return re.sub(r"[^\w]+", " ", unicodedata.normalize("NFC", str(v)).lower()).strip()
+
+
+def _canon_names(names, codes):
+    n = pd.Series(names, dtype="object")
+    if n.dropna().empty:
+        return names
+    c = pd.Series(codes, dtype="object")
+    use_code = c.notna().mean() > 0.5
+    key = c.where(c.notna(), None) if use_code else n.map(lambda v: _name_key(v) if pd.notna(v) else None)
+    if use_code:      # dòng có tên nhưng thiếu mã: dùng khoá theo tên
+        key = key.where(key.notna(), n.map(lambda v: "~" + _name_key(v) if pd.notna(v) else None))
+    df = pd.DataFrame({"k": key, "n": n}).dropna()
+    if df.empty:
+        return names
+    best = df.groupby(["k", "n"]).size().reset_index(name="c").sort_values(["k", "c", "n"], ascending=[True, False, True])
+    best = best.drop_duplicates("k").set_index("k")["n"]
+    return key.map(best).where(n.notna(), np.nan).values
+
+
+_TIER = re.compile(r"than thiet|\bvip\b|\bsi\b|\ble\b|thuong|\bbac\b|\bvang\b|kim cuong|dong|moi|quen|dai ly|cong ty|doanh nghiep")
+
+
+def _pick_cust_group(cat, cr):
+    """Cột nhóm khách trong danh mục khách: ưu tiên cột 2–20 giá trị có chữ kiểu 'thân thiết / sỉ / lẻ / VIP'."""
+    skip = {cr.get("cust_code"), cr.get("cust_name"), cr.get("item_name"), "_nguon"}
+    best, best_score = None, 0.0
+    for c in cat.columns:
+        if c in skip or pd.api.types.is_numeric_dtype(cat[c]) or pd.api.types.is_datetime64_any_dtype(cat[c]):
+            continue
+        v = cat[c].dropna().astype(str)
+        if not (2 <= v.nunique() <= 20):
+            continue
+        name_ok = bool(re.search(r"nhom|loai|hang|doi tuong|phan loai|cap", fold(c)))
+        score = v.map(lambda x: bool(_TIER.search(fold(x)))).mean() + (0.5 if name_ok else 0) \
+            + (0.5 if c == cr.get("cust_group") else 0)
+        if score > best_score:
+            best, best_score = c, score
+    return best if best_score >= 0.5 else None
 
 
 # ----------------------------------------------------------------------------- dựng bảng
@@ -262,7 +305,7 @@ def _build(biz):
         name_col = cr.get("cust_name") or (cr.get("item_name") if "khach" in fold(t) else None)
         if not name_col and "khach" in fold(t):
             name_col = next((c for c in cdf.columns if fold(c) in ("kh", "ten", "ho ten", "ho va ten", "tengoi", "khach hang")), None)
-        if not name_col and "cust_group" not in cr:
+        if not name_col and _pick_cust_group(cdf, cr) is None:
             continue
         cat = cdf.drop_duplicates(cr["cust_code"])
         cat.index = cat[cr["cust_code"]].astype("string").str.strip()
@@ -271,8 +314,9 @@ def _build(biz):
             continue
         if name_col and out["ten_khach"].isna().all():
             out["ten_khach"] = k.map(cat[name_col]).values
-        if "cust_group" in cr and out["nhom_khach"].isna().all():
-            out["nhom_khach"] = k.map(cat[cr["cust_group"]]).values
+        gcol = _pick_cust_group(cat, cr)
+        if gcol is not None and out["nhom_khach"].isna().all():
+            out["nhom_khach"] = k.map(cat[gcol]).values
     # 4c) tên nhân viên theo mã nhân viên
     out["ten_nhan_vien"] = np.nan
     for t, (sdf, sr, sm) in info.items():
@@ -349,6 +393,10 @@ def _build(biz):
     out["tinh_dt"] = ~huy & ~out["tra_hang"]
     out = out.drop(columns=["trang_thai_goc"])
     out["thoi_diem"] = pd.to_datetime(out["thoi_diem"], errors="coerce")
+    # Tên hàng / tên khách ghi nhiều kiểu ("RED BULL 250ML", "Red Bull  250ml"): gom về MỘT cách viết
+    # (cách viết gặp nhiều nhất) theo mã nếu có mã, không có mã thì theo tên đã bỏ hoa thường/khoảng trắng/dấu câu.
+    out["ten_hang"] = _canon_names(out["ten_hang"], out["ma_hang"])
+    out["ten_khach"] = _canon_names(out["ten_khach"], out["ma_khach"])
     if out["ke_don"].notna().any():       # thuốc kê đơn: True/False (dữ liệu ghi True, 1, "Có", "x"...)
         out["ke_don"] = out["ke_don"].map(lambda v: (bool(v) if isinstance(v, (bool, np.bool_, int, float, np.integer))
                                                     else fold(v) in ("co", "x", "true", "yes", "ke don", "rx", "1"))
