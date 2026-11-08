@@ -41,6 +41,9 @@ CODE_TIMEOUT = int(os.environ.get("AGENT_CODE_TIMEOUT", "30"))  # giây chạy t
 OUT_LIMIT = 3500                                               # số ký tự kết quả in ra gửi lại cho LLM
 TIME_BUDGET = int(os.environ.get("AGENT_TIME_BUDGET", "300"))  # giây tối đa cho 1 câu; quá thì bỏ qua (abstain)
 VERBOSE = os.environ.get("AGENT_VERBOSE", "1") == "1"          # in tiến độ từng lượt ra màn hình
+# Đáp án bằng 0 / danh sách rỗng gần như luôn là do code lọc sai (train: chỉ 4/3000 đáp án là 0, không có list rỗng).
+# Sai bị -1 điểm, bỏ qua 0 điểm -> gặp kết quả này thì bỏ qua (abstain).
+ABSTAIN_ZERO = os.environ.get("AGENT_ABSTAIN_ZERO", "1") == "1"
 
 # --------------------------------------------------------------------------- bộ nhớ đệm
 
@@ -564,6 +567,10 @@ def solve(question: dict, data_dir: str) -> dict:
                     continue
             if ans is not None:
                 ans = _restore_names(ans, env["tables"])
+                if ABSTAIN_ZERO and ((ans["type"] in ("number", "percent") and ans["answer"] == 0)
+                                     or (ans["type"] in ("list",) and not ans["answer"])):
+                    outputs.append(f"Bỏ qua vì đáp án rỗng/bằng 0: {ans}")
+                    ans = {"type": "abstain"}
                 return {"answer": ans, "thinking": thinking_log or None, "code": "\n\n# ---\n".join(codes),
                         "output": outputs, "steps": step, "seconds": round(time.time() - t0, 1)}
             feedback = f"Kết quả in ra:\n```\n{out}\n```\nANSWER chưa đúng format: {problem}"
