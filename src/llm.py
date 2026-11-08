@@ -6,7 +6,7 @@ Chọn bằng biến môi trường:
     LLM_BASE_URL  ollama: http://localhost:11434 ; openai: http://localhost:8000/v1
     LLM_MODEL     ollama: qwen3:8b ; vLLM: tên model khi chạy `vllm serve` (vd Qwen/Qwen3-14B)
     LLM_THINK     1 = cho model "suy nghĩ" trước khi trả lời (chậm hơn, thường đúng hơn); 0 = tắt
-    LLM_NUM_CTX   độ dài ngữ cảnh cho Ollama (mặc định 24576; Ollama mặc định chỉ 4096 -> cắt mất prompt)
+    LLM_NUM_CTX   độ dài ngữ cảnh cho Ollama (mặc định 32768; Ollama mặc định chỉ 4096 -> cắt mất prompt)
     LLM_TIMEOUT   giây chờ mỗi lần gọi (mặc định 300)
     LLM_MAX_TOKENS số token tối đa mỗi lượt (mặc định 1500, hoặc 5000 khi LLM_THINK=1)
 
@@ -25,7 +25,7 @@ BASE_URL = os.environ.get("LLM_BASE_URL",
                           "http://localhost:11434" if BACKEND == "ollama" else "http://localhost:8000/v1").rstrip("/")
 MODEL = os.environ.get("LLM_MODEL", "qwen3:8b" if BACKEND == "ollama" else "Qwen/Qwen3-14B")
 THINK = os.environ.get("LLM_THINK", "0") == "1"
-NUM_CTX = int(os.environ.get("LLM_NUM_CTX", "24576"))
+NUM_CTX = int(os.environ.get("LLM_NUM_CTX", "32768"))
 TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "300"))
 # số token tối đa model được viết mỗi lượt. Không suy nghĩ: 1 khối code ngắn là đủ (tránh model lặp vô tận);
 # có suy nghĩ: cần dài hơn cho phần suy nghĩ.

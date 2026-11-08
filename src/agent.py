@@ -153,7 +153,8 @@ Công thức (B = tables['ban_hang_chuan'], p = PERIODS[0]):
   (không có cột so_luong_co_ban thì dùng so_luong; không có ma_hang thì bỏ cột 'ma')
 - THEO MẶT HÀNG / NHÓM / KHÁCH / KÊNH / NHÂN VIÊN: lọc thêm bằng match(), KHÔNG so sánh == với chữ tự gõ:
     b = b[match(b['ten_hang'], 'Sữa đặc Ông Thọ')]      # hoặc match(b['nhom_hang'], 'điện'), match(b['kenh'], 'zalo')
-  THUỐC KÊ ĐƠN: b[b['ke_don']]; theo HOẠT CHẤT: b[b['hoat_chat'].fillna('').str.contains('Cetirizin', case=False)]
+  THUỐC KÊ ĐƠN: b[b['ke_don']]; theo HOẠT CHẤT (ghi ĐÚNG như vậy, thuốc phối hợp nhiều hoạt chất là loại riêng):
+    b[b['hoat_chat'].map(norm) == norm('Cetirizin')]
 - CA SÁNG / CA CHIỀU (giờ tạo đơn, xem rulebook; train: sáng 06:00–13:59, chiều 14:00–21:59):
     h = b['thoi_diem'].dt.hour
     sang = b[(h >= 6) & (h <= 13)];   chieu = b[(h >= 14) & (h <= 21)]
@@ -174,6 +175,26 @@ Công thức (B = tables['ban_hang_chuan'], p = PERIODS[0]):
 - LÃI GỘP (§5): doanh thu − (so_luong × gia_von) trên các dòng tính doanh thu.
 - "THÁNG NÀO": type "date", dạng "YYYY-MM". "NGÀY NÀO": "YYYY-MM-DD".
 - Trả tên (hàng, khách...) đúng như trong dữ liệu, không bỏ dấu, không xoá khoảng trắng.
+
+# BẢNG CHUẨN NHẬP HÀNG `nhap_hang_chuan` (N = tables['nhap_hang_chuan'], nếu có)
+- TIỀN NHẬP HÀNG trong kỳ: x = N[N['tinh'] & in_period(N['ngay'], p)]
+    có cột tong_phieu: x.drop_duplicates('ma_phieu')['tong_phieu'].sum(); không có: x['thanh_tien'].sum()
+- NHÀ CUNG CẤP nhập nhiều tiền nhất: x.groupby('ncc')['thanh_tien'].sum().idxmax() (trả tên ncc)
+- GIÁ NHẬP BÌNH QUÂN của X trong tháng (theo đơn vị nhập, bình quân theo số lượng):
+    y = x[match(x['ten_hang'], 'X')];   round(y['thanh_tien'].sum() / y['so_luong'].sum())
+  (shop không ghi giá nhập → unanswerable)
+
+# CÔNG NỢ (§4): `cong_no_don` (O) và `thu_tien` (T), nếu có
+- Chỉ đơn ghi_no == True và huy == False. COD / bán qua sàn không phải nợ (đã loại trong ghi_no).
+- THU NỢ / khách trả nợ trong kỳ: T[T['ghi_no'] & ~T['huy'] & T['sau_ngay_mua'] & in_period(T['ngay_tra'], p)]['so_tien'].sum()
+- NỢ THÊM trong kỳ: với đơn o ghi nợ đặt trong kỳ: tong_don − tiền trả CÙNG ngày mua (T['ngay_tra'] == T['ngay_don']), cộng lại.
+- CÒN NỢ đến hết ngày X (X = p['end']):
+    o = O[O['ghi_no'] & ~O['huy'] & (O['ngay'] <= X)].copy()
+    da_tra = T[T['ngay_tra'] <= X].groupby('ma_don')['so_tien'].sum()
+    o['no'] = o['tong_don'] - o['ma_don'].map(da_tra).fillna(0);   o = o[o['no'] > 0]
+  Tổng nợ: o['no'].sum(). Số khách còn nợ: o['ma_khach'].dropna().nunique(). Top khách nợ: groupby('ma_khach') (bỏ khách lẻ).
+  Đơn đã đặt quá N ngày: o[(X - o['ngay']).dt.days > N].
+- Một khách cụ thể: lọc O / T theo mã đơn của khách đó (match(O['ten_khach'], 'tên')).
 
 # KHI PHẢI DÙNG BẢNG GỐC
 - Trạng thái đơn ghi nhiều kiểu: dùng status_of(...) / valid_orders(df, "cột trạng thái", "cột mã đơn").
@@ -231,7 +252,7 @@ _BAN_DESC = {
     "don_gia": "đơn giá", "thanh_tien": "thành tiền dòng sau giảm (doanh thu)", "gia_von": "giá vốn 1 đơn vị bán",
     "ma_khach": "mã khách", "ten_khach": "tên khách", "nhom_khach": "nhóm khách", "kenh": "kênh bán",
     "nhan_vien": "mã nhân viên bán", "ten_nhan_vien": "tên nhân viên",
-    "ke_don": "True = thuốc kê đơn", "hoat_chat": "hoạt chất của thuốc (lọc bằng .str.contains)",
+    "ke_don": "True = thuốc kê đơn", "hoat_chat": "hoạt chất của thuốc (so khớp đúng cả chuỗi bằng norm)",
 }
 
 
@@ -252,7 +273,43 @@ def _ban_schema(df, ban):
         else:
             ex = "; ".join(map(str, s.astype(str).unique()[:3]))
         lines.append(f"- `{c}`: {_BAN_DESC.get(c, '')} | {ex[:120]}")
-    return "\n".join(lines) + "\n\n# Các bảng GỐC của shop\n"
+    return "\n".join(lines) + "\n"
+
+
+_STD_DESC = {
+    "nhap_hang_chuan": ("mỗi dòng là một dòng hàng trong phiếu nhập", {
+        "ma_phieu": "mã phiếu nhập", "ngay": "ngày phiếu", "huy": "phiếu huỷ", "tinh": "True = phiếu được tính (không huỷ)",
+        "ncc": "nhà cung cấp (tên)", "ncc_ma": "mã nhà cung cấp", "ma_hang": "mã hàng", "ten_hang": "tên hàng",
+        "don_vi": "đơn vị nhập", "so_luong": "số lượng nhập (theo đơn vị nhập)", "don_gia": "giá nhập 1 đơn vị nhập",
+        "thanh_tien": "tiền nhập của dòng", "tong_phieu": "tổng tiền CẢ PHIẾU (lặp lại ở mọi dòng của phiếu)"}),
+    "cong_no_don": ("mỗi dòng là một ĐƠN bán (để tính công nợ §4)", {
+        "ma_don": "mã đơn", "ngay": "ngày đặt", "tong_don": "số khách phải trả cả đơn", "pttt": "hình thức thanh toán",
+        "ghi_no": "True = đơn bán nợ (mua chịu)", "cod_san": "đơn COD / bán qua sàn (không phải nợ)", "huy": "đơn huỷ",
+        "ma_khach": "mã khách", "ten_khach": "tên khách", "kenh": "kênh", "trang_thai": "trạng thái chuẩn",
+        "tra_hang": "đơn có trả hàng"}),
+    "thu_tien": ("mỗi dòng là MỘT LẦN khách trả tiền cho một đơn", {
+        "ma_don": "mã đơn", "ngay_tra": "ngày trả", "so_tien": "số tiền trả lần đó", "ngay_don": "ngày đặt của đơn",
+        "sau_ngay_mua": "True = trả SAU ngày mua (trả nợ)", "ghi_no": "đơn đó là đơn bán nợ", "huy": "đơn đó bị huỷ"}),
+}
+
+
+def _std_schema(name, df):
+    if df is None:
+        return ""
+    what, desc = _STD_DESC[name]
+    lines = [f"## Bảng CHUẨN `{name}`: {len(df):,} dòng, {what}."]
+    for c in df.columns:
+        s = df[c].dropna()
+        if pd.api.types.is_bool_dtype(df[c]):
+            ex = f"True ở {int(s.sum()):,} dòng"
+        elif pd.api.types.is_datetime64_any_dtype(df[c]):
+            ex = f"{s.min():%Y-%m-%d} → {s.max():%Y-%m-%d}" if len(s) else ""
+        elif c in ("pttt", "don_vi", "ncc") and s.nunique() <= 10:
+            ex = ", ".join(map(str, s.value_counts().index[:10]))
+        else:
+            ex = "; ".join(map(str, s.astype(str).unique()[:3]))
+        lines.append(f"- `{c}`: {desc.get(c, '')} | {ex[:110]}")
+    return "\n".join(lines) + "\n"
 
 
 def _in_period(series, p):
@@ -401,17 +458,37 @@ def _explain_error(e, code, env):
 _STATUS_COL = re.compile(r"^(trang thai|tinh trang|status|tien do|ket qua|xu ly|tt don|ghi chu tt)")
 
 
-def _self_check(question, code, tables):
+def _self_check(question, code, tables, plist=None):
     """Bắt lỗi hay gặp nhất của model nhỏ: tính doanh thu/số đơn/bán chạy mà quên bỏ đơn huỷ, đơn trả.
     Trả về câu nhắc (str) hoặc None. Quy tắc chung cho mọi shop, không theo business_id."""
     q = fold(question)
     # (a) tự viết ngày tháng thay vì dùng PERIODS
-    if re.search(r"""["']start["']\s*:|pd\.Timestamp\(\s*["']20\d\d-\d\d-01["']\s*\)""", code) and "PERIODS" in code \
-            or re.search(r"""["']start["']\s*:\s*pd\.Timestamp""", code):
+    lits = set(re.findall(r"""pd\.Timestamp\(\s*["'](20\d\d-\d\d-\d\d)["']\s*\)""", code))
+    allowed = set()
+    for p in plist or []:
+        for k in ("start", "end"):
+            if p.get(k) is not None:
+                allowed.add(p[k].strftime("%Y-%m-%d"))
+    # chỉ nhắc khi model tự viết khoảng ngày KHÁC với PERIODS (viết lại đúng ngày thì không sao)
+    if plist and re.search(r"""["']start["']\s*:""", code) and lits and not lits <= allowed:
         return ("Code đang TỰ VIẾT khoảng ngày (dict 'start'/'end' hoặc pd.Timestamp ngày đầu tháng). Hãy dùng đúng "
                 "PERIODS[0], PERIODS[1]... đã tính sẵn ở phần CÂU HỎI (kỳ so sánh cũng có sẵn trong PERIODS), không tự tạo.")
+    # (c) câu hỏi theo hoạt chất / thuốc kê đơn mà code không dùng cột tương ứng
+    if "ban_hang_chuan" in tables:
+        cols = tables["ban_hang_chuan"].columns
+        if re.search(r"hoat chat", q) and "hoat_chat" in cols and "hoat_chat" not in code:
+            return ("Câu hỏi theo HOẠT CHẤT: phải lọc cột hoat_chat của ban_hang_chuan, ghi đúng như vậy (không lọc theo tên hàng):"
+                    " b[b['hoat_chat'].map(norm) == norm('tên hoạt chất')]")
+        if re.search(r"ke don", q) and "ke_don" in cols and "ke_don" not in code:
+            return "Câu hỏi về thuốc kê đơn: lọc bằng cột ke_don của ban_hang_chuan (b[b['ke_don']] hoặc b[~b['ke_don']])."
     # (b) đếm đơn bằng số dòng
-    if "ban_hang_chuan" in code or re.search(r"\bB\[", code):
+    uses_ban = "ban_hang_chuan" in code or re.search(r"\bB\[", code)
+    skip_q = re.search(r"\bhuy\b|tra hang|tra lai|\bno\b|cong no|nhap|ton kho|ty le|ti le|gia ban|don gia", q)
+    if (uses_ban and not skip_q and "tinh_dt" not in code and "trang_thai" not in code and "tra_hang" not in code):
+        return ("Code dùng tables['ban_hang_chuan'] nhưng CHƯA lọc b['tinh_dt'] (bỏ đơn huỷ, đơn trả hàng theo §1). "
+                "Doanh thu, số đơn, bán chạy, chi tiêu của khách... chỉ tính dòng có tinh_dt == True: "
+                "thêm  b = b[b['tinh_dt']]  rồi tính lại.")
+    if uses_ban:
         lit = re.search(r"""\[['"](ten_hang|nhom_hang|nhom_khach|ten_khach|kenh|hoat_chat)['"]\]\s*==\s*['"]""", code)
         if lit:
             return (f"Đang so sánh cột '{lit[1]}' bằng == với chữ tự gõ (dễ sai hoa thường, dấu, khoảng trắng). "
@@ -607,8 +684,15 @@ def solve(question: dict, data_dir: str) -> dict:
     tables = {}
     if ban is not None:
         tables["ban_hang_chuan"] = ban[[c for c in ban.columns if ban[c].notna().any()]].copy()
+    for name, df in (("nhap_hang_chuan", getattr(biz, "nhap", None)), ("cong_no_don", getattr(biz, "no_don", None)),
+                     ("thu_tien", getattr(biz, "thu_tien", None))):
+        if df is not None and len(df):
+            tables[name] = df[[c for c in df.columns if df[c].notna().any()]].copy()
     tables.update({k: v.copy() for k, v in biz.tables.items()})          # bản sao: code của LLM không làm hỏng cache
     env = {"tables": tables, "B": tables.get("ban_hang_chuan"),
+           # model hay gọi thẳng tên bảng chuẩn như một biến: cho phép luôn
+           **{n: tables[n] for n in ("ban_hang_chuan", "nhap_hang_chuan", "cong_no_don", "thu_tien") if n in tables},
+           "N": tables.get("nhap_hang_chuan"), "O": tables.get("cong_no_don"), "T": tables.get("thu_tien"),
            "pd": pd, "np": np, "re": re, "math": math,
            "TODAY": today, "DATA_END": data_end,
            "PERIODS": plist,
@@ -618,11 +702,24 @@ def solve(question: dict, data_dir: str) -> dict:
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(rulebook=rulebook, max_steps=MAX_STEPS)},
         {"role": "user", "content": USER_TEMPLATE.format(
-            schema=_ban_schema(tables.get("ban_hang_chuan"), ban) + biz.schema_text(), today=question["as_of_date"],
+            schema=(_ban_schema(tables.get("ban_hang_chuan"), ban)
+                    + "".join(_std_schema(n, tables.get(n)) for n in ("nhap_hang_chuan", "cong_no_don", "thu_tien"))
+                    + "\n# Các bảng GỐC của shop\n" + biz.schema_text()), today=question["as_of_date"],
             data_end=biz.data_end or "không ghi", periods=p_text, question=question["question"])},
     ]
     thinking_log, codes, outputs = [], [], []
     critiqued = 0
+    pending = None          # đáp án đã có trước lần "tự kiểm" (giữ lại nếu model không đưa được đáp án mới)
+
+    def finalize(ans, step):
+        ans = _restore_names(ans, env["tables"])
+        ans = _fix_date_type(question["question"], ans)
+        if ABSTAIN_ZERO and ((ans["type"] in ("number", "percent") and ans["answer"] == 0)
+                             or (ans["type"] in ("list",) and not ans["answer"])):
+            outputs.append(f"Bỏ qua vì đáp án rỗng/bằng 0: {ans}")
+            ans = {"type": "abstain"}
+        return {"answer": ans, "thinking": thinking_log or None, "code": "\n\n# ---\n".join(codes),
+                "output": outputs, "steps": step, "seconds": round(time.time() - t0, 1)}
     for step in range(1, MAX_STEPS + 1):
         if time.time() - t0 > TIME_BUDGET:
             outputs.append(f"Hết thời gian {TIME_BUDGET}s cho câu này")
@@ -642,6 +739,9 @@ def solve(question: dict, data_dir: str) -> dict:
             messages.append({"role": "user", "content": feedback})
             continue
         if codes and code.strip() == codes[-1].strip():
+            if pending is not None:          # model giữ nguyên code sau lần tự kiểm: dùng luôn đáp án đó
+                outputs.append("Model giữ nguyên code sau khi tự kiểm -> dùng đáp án trước đó")
+                return finalize(pending, step)
             feedback = ("Code này GIỐNG HỆT lần trước nên sẽ lỗi/ra kết quả y như cũ. "
                         "Đọc kỹ thông báo lỗi và gợi ý ở trên rồi viết code KHÁC.")
             outputs.append(feedback)
@@ -660,9 +760,12 @@ def solve(question: dict, data_dir: str) -> dict:
         elif "ANSWER" in env:
             ans, problem = normalize_answer(env["ANSWER"])
             if ans is not None and critiqued < 2 and step < MAX_STEPS:
-                warn = _self_check(question["question"], "\n".join(codes), env["tables"])
+                warn = _self_check(question["question"], "\n".join(codes), env["tables"], plist)
                 if warn:
                     critiqued += 1
+                    # nhắc "yếu" (có thể nhắc nhầm): nếu model giữ nguyên thì vẫn dùng đáp án cũ.
+                    # nhắc "chắc" (thiếu lọc tinh_dt, sai khoảng ngày, thiếu cột hoạt chất...): giữ nguyên thì bỏ qua câu.
+                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN")) else None
                     messages.append({"role": "user", "content":
                                      f"Kết quả in ra:\n```\n{out}\n```\nANSWER hiện tại: {ans}\n"
                                      f"KIỂM TRA LẠI: {warn}\nNếu cần sửa thì viết code mới và gán lại ANSWER; "
@@ -671,14 +774,7 @@ def solve(question: dict, data_dir: str) -> dict:
                         print(f"           tự kiểm: {warn[:90]}", flush=True)
                     continue
             if ans is not None:
-                ans = _restore_names(ans, env["tables"])
-                ans = _fix_date_type(question["question"], ans)
-                if ABSTAIN_ZERO and ((ans["type"] in ("number", "percent") and ans["answer"] == 0)
-                                     or (ans["type"] in ("list",) and not ans["answer"])):
-                    outputs.append(f"Bỏ qua vì đáp án rỗng/bằng 0: {ans}")
-                    ans = {"type": "abstain"}
-                return {"answer": ans, "thinking": thinking_log or None, "code": "\n\n# ---\n".join(codes),
-                        "output": outputs, "steps": step, "seconds": round(time.time() - t0, 1)}
+                return finalize(ans, step)
             feedback = f"Kết quả in ra:\n```\n{out}\n```\nANSWER chưa đúng format: {problem}"
         else:
             left = MAX_STEPS - step
@@ -687,5 +783,8 @@ def solve(question: dict, data_dir: str) -> dict:
                            "Đây là LƯỢT CUỐI: bắt buộc gán ANSWER (hoặc unanswerable nếu dữ liệu không đủ)."))
         messages.append({"role": "user", "content": feedback})
 
+    if pending is not None:                  # hết lượt / hết giờ sau lần tự kiểm: dùng đáp án đã có
+        outputs.append("Hết lượt sau khi tự kiểm -> dùng đáp án trước đó")
+        return finalize(pending, len(codes))
     return {"answer": {"type": "abstain"}, "thinking": thinking_log or None, "code": "\n\n# ---\n".join(codes),
             "output": outputs, "steps": len(codes), "seconds": round(time.time() - t0, 1)}

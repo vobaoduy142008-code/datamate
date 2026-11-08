@@ -6,30 +6,32 @@ Model ngôn ngữ đọc câu hỏi, viết code Python (pandas) để tính, ch
 ## Khai báo model (theo luật cuộc thi)
 | Mục | Giá trị |
 |---|---|
-| Model duy nhất dùng khi chạy | **Qwen/Qwen3-14B** (14,8 tỉ tham số, bản gốc bf16, không fine-tune, không quantize) |
-| Nguồn | https://huggingface.co/Qwen/Qwen3-14B (công bố 04/2025) |
+| Model duy nhất dùng khi chạy | **Qwen3-8B** (8,2 tỉ tham số), bản lượng tử hoá 4-bit `qwen3:8b` của thư viện Ollama (GGUF Q4_K_M), không fine-tune |
+| Nguồn | https://huggingface.co/Qwen/Qwen3-8B (công bố 04/2025); bản Ollama: https://ollama.com/library/qwen3 |
 | Giấy phép | Apache 2.0 |
+| Phần mềm chạy model | Ollama (phiên bản ghi trong lệnh build, trùng với máy của đội) |
 | Model khác (embedding, reranker…) | Không dùng |
 | Huấn luyện / fine-tune | Không. Dữ liệu train chỉ dùng để đo điểm và sửa code. Không dùng dữ liệu public/private test để huấn luyện. |
-| Chế độ sinh | Greedy (temperature 0, seed 0), tắt chế độ suy nghĩ (`enable_thinking=false`) để kết quả lặp lại được |
-| Mạng | Chạy hoàn toàn offline (`--network none`) |
+| Chế độ sinh | Greedy (temperature 0, seed 0), num_ctx 32768, tắt chế độ suy nghĩ; chạy 1 câu một lúc để kết quả lặp lại được |
+| Mạng | Chạy hoàn toàn offline (`--network none`); model đã nằm sẵn trong image |
 
-Code được đội viết với sự hỗ trợ của trợ lý lập trình AI (Claude) trong lúc phát triển. Khi chạy chấm điểm, **chỉ** dùng Qwen3-14B ở trên, không gọi dịch vụ hay model nào khác.
+Code được đội viết với sự hỗ trợ của trợ lý lập trình AI (Claude) trong lúc phát triển. Khi chạy chấm điểm, **chỉ** dùng Qwen3-8B ở trên, không gọi dịch vụ hay model nào khác.
 
 ## Cấu trúc thư mục
 ```
 datamate/
-├── predict.sh              # lệnh BTC chạy trong Docker: bật vLLM -> chạy agent -> /result
-├── Dockerfile              # đóng image nộp bài
+├── predict.sh              # lệnh BTC chạy trong Docker: bật Ollama -> chạy agent -> /result
+├── Dockerfile              # đóng image nộp bài (Ollama + Qwen3-8B)
+├── Dockerfile.vllm         # (dự phòng) bản vLLM + Qwen3-14B, cần GPU lớn
 ├── requirements.txt        # thư viện khi phát triển trên máy cá nhân
-├── requirements-docker.txt # thư viện của agent trong Docker (cài riêng, không đụng vLLM)
+├── requirements-docker.txt # thư viện của agent trong Docker (Python 3.12 riêng trong image)
 ├── scripts/
-│   ├── tai_model.sh        # tải Qwen3-14B vào models/Qwen3-14B
+│   ├── tai_model.sh        # (chỉ cho bản vLLM dự phòng) tải Qwen3-14B
 │   └── kiem_tra_ket_qua.py # kiểm tra /result có đúng định dạng BTC
 ├── src/
 │   ├── main.py        # đọc câu hỏi -> agent -> ghi submission.jsonl + log từng câu (song song, có hạn giờ)
 │   ├── agent.py       # bộ não: prompt, chạy code, tự sửa lỗi, chuẩn hoá đáp án
-│   ├── llm.py         # gọi model: Ollama (máy cá nhân) / vLLM (Docker) / mock (thử không cần model)
+│   ├── llm.py         # gọi model: Ollama (Mac và Docker) / vLLM (dự phòng) / mock (thử không cần model)
 │   ├── loader.py      # đọc & làm sạch dữ liệu mọi định dạng (rulebook §8)
 │   ├── periods.py     # đổi "tuần rồi", "tháng này", "Tết"... thành khoảng ngày (rulebook §2)
 │   ├── scorer.py      # chấm điểm Penalized Accuracy
@@ -47,14 +49,17 @@ docker run --rm --gpus all --network none --shm-size=16g \
   datamate:v1
 ```
 `/code/predict.sh` (không tham số):
-1. Bật vLLM với Qwen3-14B, tự chia cho mọi GPU (`--tensor-parallel-size` = số GPU), chỉ nghe ở 127.0.0.1.
-2. Trong lúc model nạp: đọc trước dữ liệu tất cả shop.
-3. Chạy agent song song 4 câu; mỗi câu ghi ngay 1 dòng vào `/result/submission.jsonl`, log vào `/result/logs/<id>.json` và `/result/logs/log.jsonl` (id, answer, elapsed_ms, thinking, code, output).
+1. Bật Ollama (chỉ nghe ở 127.0.0.1); trong lúc đó đọc trước dữ liệu tất cả shop.
+2. Nạp Qwen3-8B lên GPU.
+3. Chạy agent từng câu; mỗi câu ghi ngay 1 dòng vào `/result/submission.jsonl`, log vào `/result/logs/<id>.json` và `/result/logs/log.jsonl` (id, answer, elapsed_ms, thinking, code, output).
 4. Hạn chót tổng 5 giờ 40 phút kể cả lúc nạp model: thời gian được chia theo số câu còn lại; nếu đến hạn mà còn câu chưa xong thì các câu đó ghi `abstain` để file nộp luôn đủ câu.
 
 Thử không cần GPU (LLM giả): thêm `-e LLM_BACKEND=mock`, bỏ `--gpus all`.
 
-Các biến có thể chỉnh khi chạy (`-e TÊN=giá_trị`): `AGENT_WORKERS` (4), `TOTAL_SECONDS` (20400), `MAX_LEN` (32768), `GPU_UTIL` (0.90), `LLM_THINK` (0).
+Các biến có thể chỉnh khi chạy (`-e TÊN=giá_trị`): `AGENT_WORKERS` (1), `TOTAL_SECONDS` (20400), `LLM_NUM_CTX` (32768), `LLM_THINK` (0).
+
+Chạy cùng bài trên máy của đội (Mac, Ollama + qwen3:8b cùng phiên bản) cho kết quả như trong Docker:
+`python src/main.py --data <thư mục test> --out <thư mục kết quả>`
 
 ## Phát triển trên máy cá nhân
 ```bash

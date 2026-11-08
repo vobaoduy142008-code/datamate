@@ -30,7 +30,7 @@ import pandas as pd
 
 from loader import fold
 
-SALES_VERSION = "s4"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
+SALES_VERSION = "s8"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
 
 # ----------------------------------------------------------------------------- trạng thái đơn (rulebook §8)
 ST_HUY = re.compile(r"\bhuy\b|cancel|khong giao duoc|giao that bai|\bthat bai")   # \b: "chuyen" có chứa "huy"!
@@ -136,7 +136,7 @@ def column_roles(df, meanings):
 
 
 def _is_import(tname, roles, meanings):
-    t = fold(tname)
+    t = _tn(tname)
     if re.search(r"nhap|ton kho|tonkho|lo hang|lohang|the kho|gia$|lich su gia|quy doi|don vi|chi phi|so quy|thanh toan|phieu thu", t):
         return True
     m = " ".join(fold(v) for v in meanings.values())
@@ -192,6 +192,11 @@ def build_sales(biz):
     except Exception as e:                    # không bao giờ làm hỏng agent
         biz.warnings.append(f"ban_hang_chuan: lỗi {e!r}")
         return None
+
+
+def _tn(t):
+    """Tên bảng đã bỏ dấu, '_' thành khoảng trắng: 'tra_hang' -> 'tra hang'."""
+    return re.sub(r"[_\-.]+", " ", fold(t)).strip()
 
 
 def _norm_id(s):
@@ -302,8 +307,8 @@ def _build(biz):
     for t, (cdf, cr, cm) in info.items():
         if t in used or len(cdf) > 20000 or "cust_code" not in cr or out["ma_khach"].isna().all():
             continue
-        name_col = cr.get("cust_name") or (cr.get("item_name") if "khach" in fold(t) else None)
-        if not name_col and "khach" in fold(t):
+        name_col = cr.get("cust_name") or (cr.get("item_name") if "khach" in _tn(t) else None)
+        if not name_col and "khach" in _tn(t):
             name_col = next((c for c in cdf.columns if fold(c) in ("kh", "ten", "ho ten", "ho va ten", "tengoi", "khach hang")), None)
         if not name_col and _pick_cust_group(cdf, cr) is None:
             continue
@@ -317,10 +322,13 @@ def _build(biz):
         gcol = _pick_cust_group(cat, cr)
         if gcol is not None and out["nhom_khach"].isna().all():
             out["nhom_khach"] = k.map(cat[gcol]).values
+    # đơn không có mã khách (khách lẻ) thì không có nhóm khách: ghi rõ để khi chia tỉ trọng không bị rơi mất (groupby bỏ NaN)
+    if out["nhom_khach"].notna().any() and out["ma_khach"].notna().any():
+        out.loc[out["ma_khach"].isna() & out["nhom_khach"].isna(), "nhom_khach"] = "(khách lẻ, không có mã)"
     # 4c) tên nhân viên theo mã nhân viên
     out["ten_nhan_vien"] = np.nan
     for t, (sdf, sr, sm) in info.items():
-        if "staff" not in sr or "nhan vien" not in fold(t) or out["nhan_vien"].isna().all():
+        if "staff" not in sr or "nhan vien" not in _tn(t) or out["nhan_vien"].isna().all():
             continue
         name_col = next((c for c in sdf.columns if c != sr["staff"] and re.search(r"^(ten|ho ten|tengoi|ho va ten)", fold(c))), None)
         if name_col:
@@ -329,7 +337,7 @@ def _build(biz):
     # 4d) mã hàng theo tên (khi bảng bán chỉ có tên) để xếp hạng "bằng nhau thì mã tăng dần"
     if out["ma_hang"].isna().all() and out["ten_hang"].notna().any():
         for t, (pdf, pr, pm) in info.items():
-            if t in used or len(pdf) > 5000 or not {"item_code", "item_name"} <= set(pr) or "nhap" in fold(t):
+            if t in used or len(pdf) > 5000 or not {"item_code", "item_name"} <= set(pr) or "nhap" in _tn(t):
                 continue
             cat = pdf.drop_duplicates(pr["item_name"])
             cat.index = cat[pr["item_name"]].astype("string").str.strip()
@@ -369,7 +377,7 @@ def _build(biz):
         if "ret_qty" in tr:
             ids = _norm_id(tdf.loc[tdf[tr["ret_qty"]].fillna(0) > 0, tr["id"]])
             ret_ids |= set(ids.dropna())
-        elif re.search(r"tra hang|phieu tra", fold(t)):
+        elif re.search(r"tra hang|phieu tra", _tn(t)):
             ret_ids |= set(_norm_id(tdf[tr["id"]]).dropna())
     # dòng trả hàng ghi số âm (cùng mã đơn với đơn đã bán): đơn đó có trả hàng
     neg = pd.Series(False, index=out.index)
@@ -420,3 +428,225 @@ def describe(ban):
     return (f"Bảng `ban_hang_chuan` ({len(ban):,} dòng, mỗi dòng là {src.get('moi_dong_la')}; dựng từ bảng "
             f"`{src.get('dong')}`" + (f" + `{src.get('don')}`" if src.get("don") else "") + "). "
             + (f"Cột không có dữ liệu: {', '.join(empty)}." if empty else ""))
+
+
+# ============================================================================= BẢNG NHẬP HÀNG CHUẨN
+# nhap_hang_chuan: mỗi dòng = một dòng hàng trong phiếu nhập.
+#   ma_phieu, ngay (ngày phiếu), trang_thai_goc, huy (phiếu huỷ), tinh (True = phiếu được tính: không huỷ),
+#   ncc (nhà cung cấp: tên nếu có, không thì mã), ma_hang, ten_hang, don_vi (đơn vị nhập), so_luong, don_gia (giá nhập
+#   1 đơn vị nhập), thanh_tien (tiền của dòng), tong_phieu (tổng tiền cả phiếu, lặp lại ở mọi dòng của phiếu)
+_IMP_ROLES = [
+    ("pid", r"^ma phieu nhap", r"^(ma nhap hang|ma phieu nhap|maphieunhap|so phieu|so phieu nhap|ma don nhap|ma pn)$"),
+    ("date", r"^ngay nhap", r"^(ngay nhap|ngaynhapkho|ngay nhap kho|thoi gian|ngay|ngay phieu)$"),
+    ("status", r"^trang thai phieu|^trang thai", r"^(trang thai|tinh trang|tinhtrang|status)$"),
+    ("total", r"^tong tien (cua ca )?phieu|^tong tien phieu", r"^(can tra ncc|tong gia tri nhap|tonggiatrinhap|tong tien phieu|tong tien)$"),
+    ("amount", r"^tien nhap cua ca dong", r"^(thanh tien|tien nhap)$"),
+    ("price", r"^gia nhap", r"^(gia nhap|don gia|dongianhap|don gia nhap|gia von nhap)$"),
+    ("qty", r"^so luong nhap|^so luong$", r"^(sl nhap|so luong|so luong nhap|sl|soluong)$"),
+    ("unit", r"^don vi nhap|^don vi tinh", r"^(dvt|dvt nhap|don vi tinh|don vi nhap|donvitinh|don vi)$"),
+    ("item_code", r"^ma hang", r"^(ma hang|ma sku|sku|mahanghoa|ma hh|ma sp|ma mon|ma san pham)$"),
+    ("item_name", r"^ten hang", r"^(ten hang|ten hang hoa|ten mat hang|product|san pham|hang hoa|ten sp)$"),
+    ("supplier", r"^nha cung cap|^ma nha cung cap|^ma ncc", r"^(nha cung cap|ma ncc|ma nha cung cap|manhacungcap|ncc)$"),
+]
+_IMP_C = [(r, re.compile(a), re.compile(b)) for r, a, b in _IMP_ROLES]
+
+
+def _imp_roles(df, meanings):
+    out = {}
+    cols = [c for c in df.columns if c != "_nguon"]
+    for by_m in (True, False):
+        for c in cols:
+            if c in out.values():
+                continue
+            key = fold(meanings.get(c, "")) if by_m else fold(c).replace("_", " ")
+            if by_m and not key:
+                continue
+            for role, pm, pn in _IMP_C:
+                if role not in out and (pm if by_m else pn).search(key):
+                    out[role] = c
+                    break
+    for r in ("total", "amount", "price", "qty"):
+        if r in out and not pd.api.types.is_numeric_dtype(df[out[r]]):
+            out.pop(r)
+    if "date" in out and not pd.api.types.is_datetime64_any_dtype(df[out["date"]]):
+        out.pop("date")
+    return out
+
+
+def build_imports(biz):
+    try:
+        return _build_imports(biz)
+    except Exception as e:
+        biz.warnings.append(f"nhap_hang_chuan: lỗi {e!r}")
+        return None
+
+
+def _build_imports(biz):
+    cand = {}
+    for t, df in biz.tables.items():
+        if not re.search(r"nhap", _tn(t)):
+            continue
+        r = _imp_roles(df, biz.col_meaning.get(t, {}))
+        if "pid" in r:
+            cand[t] = (df, r)
+    if not cand:
+        return None
+    # bảng dòng: có số lượng + (giá hoặc tiền dòng) + mặt hàng; bảng phiếu: có ngày, mỗi mã một dòng
+    lines = [t for t, (df, r) in cand.items() if "qty" in r and ("item_code" in r or "item_name" in r)]
+    if not lines:
+        return None
+    lt = max(lines, key=lambda t: len(cand[t][0]))
+    df, r = cand[lt]
+    out = pd.DataFrame({"ma_phieu": _norm_id(df[r["pid"]]).values})
+    for col, role in [("ngay", "date"), ("trang_thai_goc", "status"), ("ncc", "supplier"), ("ma_hang", "item_code"),
+                      ("ten_hang", "item_name"), ("don_vi", "unit"), ("so_luong", "qty"), ("don_gia", "price"),
+                      ("thanh_tien", "amount"), ("tong_phieu", "total")]:
+        out[col] = df[r[role]].values if role in r else np.nan
+    for t, (hdf, hr) in cand.items():
+        if t == lt:
+            continue
+        ids = _norm_id(hdf[hr["pid"]])
+        if ids.nunique() < 0.9 * len(ids):
+            continue
+        h = hdf.assign(_k=ids.values).drop_duplicates("_k").set_index("_k")
+        for col, role in [("ngay", "date"), ("trang_thai_goc", "status"), ("ncc", "supplier"), ("tong_phieu", "total")]:
+            if role in hr and out[col].isna().all():
+                out[col] = out["ma_phieu"].map(h[hr[role]]).values
+    if out["thanh_tien"].isna().all() and out["don_gia"].notna().any():
+        out["thanh_tien"] = pd.to_numeric(out["so_luong"], errors="coerce") * pd.to_numeric(out["don_gia"], errors="coerce")
+    if out["don_gia"].isna().all() and out["thanh_tien"].notna().any():
+        out["don_gia"] = pd.to_numeric(out["thanh_tien"], errors="coerce") / pd.to_numeric(out["so_luong"], errors="coerce")
+    # tên hàng theo mã (danh mục), tên nhà cung cấp theo mã (bảng nhà cung cấp)
+    ban = getattr(biz, "ban", None)
+    if out["ten_hang"].isna().all() and out["ma_hang"].notna().any():
+        names = {}
+        if ban is not None and ban["ma_hang"].notna().any():
+            names = ban.dropna(subset=["ma_hang", "ten_hang"]).drop_duplicates("ma_hang").set_index("ma_hang")["ten_hang"].to_dict()
+        for t, d in biz.tables.items():
+            rr = column_roles(d, biz.col_meaning.get(t, {}))
+            if {"item_code", "item_name"} <= set(rr) and len(d) <= 5000 and "nhap" not in _tn(t):
+                for k, v in zip(d[rr["item_code"]], d[rr["item_name"]]):
+                    if pd.notna(k) and pd.notna(v):
+                        names.setdefault(str(k).strip(), v)
+        out["ten_hang"] = out["ma_hang"].astype("string").str.strip().map(names).values
+    if out["ncc"].notna().any():
+        for t, d in biz.tables.items():
+            if not re.search(r"nha cung cap|ncc|supplier", _tn(t)) or t in cand:
+                continue
+            code = next((c for c in d.columns if re.search(r"^(ma )?(ncc|nha cung cap)|manhacungcap", fold(c))), None)
+            name = next((c for c in d.columns if c != code and re.search(r"^(ten|tengoi|ten ncc|ten nha cung cap)", fold(c))), None)
+            if code and name:
+                m = dict(zip(d[code].astype(str).str.strip(), d[name]))
+                k = out["ncc"].astype("string").str.strip()
+                if k.dropna().isin(list(m)).mean() > 0.5:
+                    out["ncc_ma"] = out["ncc"]
+                    out["ncc"] = k.map(m).values
+    out["ngay"] = pd.to_datetime(out["ngay"], errors="coerce").dt.normalize()
+    out["huy"] = out["trang_thai_goc"].map(lambda v: status_one(v) == "huỷ" if pd.notna(v) else False).astype(bool)
+    out["tinh"] = ~out["huy"]
+    out["ten_hang"] = _canon_names(out["ten_hang"], out["ma_hang"])
+    out = out.drop(columns=["trang_thai_goc"])
+    out.attrs["nguon"] = {"dong": lt}
+    return out
+
+
+# ============================================================================= CÔNG NỢ CHUẨN
+# cong_no_don: mỗi dòng = một đơn.  ma_don, ngay (ngày đặt), ma_khach, ten_khach, kenh, pttt (hình thức thanh toán),
+#   ghi_no (đơn bán nợ / mua chịu), cod_san (COD hoặc bán qua sàn: không phải nợ), huy, tong_don (khách phải trả cả đơn)
+# thu_tien: mỗi dòng = một lần khách trả tiền cho một đơn.  ma_don, ngay_tra, so_tien, ngay_don, sau_ngay_mua
+_PAY_M = re.compile(r"^hinh thuc thanh toan|^phuong thuc thanh toan")
+_PAY_N = re.compile(r"^(phuong thuc thanh toan|phuong thuc tt|pttt|phuongthuctt|hinh thuc thanh toan|hinh thuc tt|thanh toan bang)$")
+_TOT_M = re.compile(r"^so khach phai tra|^tong tien don|^khach phai tra|^tong thanh toan")
+_TOT_N = re.compile(r"^(tong sau giam gia|tong bill|tong tien|tongthanhtoan|tong thanh toan|phai thu|tong don|tongtien|khach phai tra)$")
+_AMT_M = re.compile(r"^so tien (tra|thu)|^tien (tra|thu)|so tien tra lan do")
+_AMT_N = re.compile(r"^(gia tri|tien|so tien|so tien thu|sotienthu|so tien tra|tien thu)$")
+_DEBT = re.compile(r"ghi no|\bdebt\b|cong no|mua chiu|\bno\b|tra sau|credit")
+_CODSAN = re.compile(r"\bcod\b|thu ho|shopee|lazada|tiki|tiktok|\bsan\b|tmdt|thuong mai dien tu|marketplace")
+
+
+def build_debt(biz):
+    try:
+        return _build_debt(biz)
+    except Exception as e:
+        biz.warnings.append(f"cong_no: lỗi {e!r}")
+        return None, None
+
+
+def _find_col(df, meanings, pm, pn, numeric=False):
+    for by_m in (True, False):
+        for c in df.columns:
+            if c == "_nguon":
+                continue
+            key = fold(meanings.get(c, "")) if by_m else fold(c).replace("_", " ")
+            if key and (pm if by_m else pn).search(key):
+                if numeric and not pd.api.types.is_numeric_dtype(df[c]):
+                    continue
+                return c
+    return None
+
+
+def _build_debt(biz):
+    ban = getattr(biz, "ban", None)
+    hname = ban.attrs.get("nguon", {}).get("don") if ban is not None else None
+    if hname is None and ban is not None and ban.attrs.get("nguon", {}).get("moi_dong_la") == "một đơn":
+        hname = ban.attrs["nguon"]["dong"]
+    if hname is None:
+        return None, None
+    H = biz.tables[hname]
+    hm = biz.col_meaning.get(hname, {})
+    hr = column_roles(H, hm)
+    pay = _find_col(H, hm, _PAY_M, _PAY_N)
+    tot = _find_col(H, hm, _TOT_M, _TOT_N, numeric=True)
+    if "id" not in hr or tot is None:
+        return None, None
+    don = pd.DataFrame({"ma_don": _norm_id(H[hr["id"]]).values})
+    don["tong_don"] = pd.to_numeric(H[tot], errors="coerce").values
+    don["pttt"] = H[pay].values if pay else np.nan
+    # ngày, khách, kênh, trạng thái lấy từ bảng bán hàng chuẩn (đã chuẩn hoá) theo mã đơn
+    if ban is not None:
+        o = ban.dropna(subset=["ma_don"]).groupby("ma_don").agg(
+            ngay=("ngay", "min"), ma_khach=("ma_khach", "first"), ten_khach=("ten_khach", "first"),
+            kenh=("kenh", "first"), trang_thai=("trang_thai", "first"), tra_hang=("tra_hang", "max"))
+        don = don.join(o, on="ma_don")
+    don = don.dropna(subset=["ma_don"]).drop_duplicates("ma_don")
+    fp = don["pttt"].map(lambda v: fold(v) if pd.notna(v) else "")
+    fk = don["kenh"].map(lambda v: fold(v) if pd.notna(v) else "") if "kenh" in don else ""
+    don["huy"] = don.get("trang_thai", pd.Series("", index=don.index)).eq("huỷ")
+    don["cod_san"] = fp.str.contains(_CODSAN) | (fk.str.contains(_CODSAN) if isinstance(fk, pd.Series) else False)
+    don["ghi_no"] = fp.str.contains(_DEBT) & ~don["cod_san"]
+    # bảng các lần trả tiền
+    thu = None
+    for t, P in biz.tables.items():
+        if t == hname or ban is not None and t == ban.attrs.get("nguon", {}).get("dong"):
+            continue
+        pm = biz.col_meaning.get(t, {})
+        pr = column_roles(P, pm)
+        amt = _find_col(P, pm, _AMT_M, _AMT_N, numeric=True)
+        dcol = next((c for c in P.columns if pd.api.types.is_datetime64_any_dtype(P[c])), None)
+        if amt is None or dcol is None or len(P) > 3 * len(don) + 1000:
+            continue
+        # cột mã đơn = cột có giá trị trùng mã đơn nhiều nhất (bảng thu còn có "mã phiếu thu" riêng)
+        dset, best, ids = set(don["ma_don"]), 0.0, None
+        for c in P.columns:
+            if c == "_nguon" or pd.api.types.is_numeric_dtype(P[c]) or pd.api.types.is_datetime64_any_dtype(P[c]):
+                continue
+            v = _norm_id(P[c])
+            frac = v.dropna().isin(dset).mean() if v.notna().any() else 0
+            if frac > best:
+                best, ids = frac, v
+        if ids is None or best < 0.5:
+            continue
+        thu = pd.DataFrame({"ma_don": ids.values, "ngay_tra": pd.to_datetime(P[dcol], errors="coerce").dt.normalize().values,
+                            "so_tien": pd.to_numeric(P[amt], errors="coerce").values})
+        thu.attrs["nguon"] = t
+        break
+    if thu is not None:
+        thu = thu.dropna(subset=["ma_don"])
+        thu["ngay_don"] = thu["ma_don"].map(don.set_index("ma_don")["ngay"])
+        thu["sau_ngay_mua"] = thu["ngay_tra"] > thu["ngay_don"]
+        thu["ghi_no"] = thu["ma_don"].map(don.set_index("ma_don")["ghi_no"]).fillna(False).astype(bool)
+        thu["huy"] = thu["ma_don"].map(don.set_index("ma_don")["huy"]).fillna(False).astype(bool)
+        thu = thu.reset_index(drop=True)
+    don = don.reset_index(drop=True)
+    don.attrs["nguon"] = hname
+    return don, thu
