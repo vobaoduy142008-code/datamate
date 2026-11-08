@@ -1,0 +1,6 @@
+# Thư viện của agent bên trong Docker (cài riêng vào /opt/agent/lib, không đụng tới thư viện của vLLM).
+# Cùng phiên bản với máy phát triển (MacBook) để kết quả giống nhau.
+pandas==3.1.1
+numpy==2.5.4
+openpyxl==3.1.5
+python-calamine==0.9.1

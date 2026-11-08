@@ -34,6 +34,7 @@ import pandas as pd
 
 import llm
 from loader import fold, load_business
+from sales import build_sales
 from periods import Calendar, find_periods
 
 MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "4"))      # số lượt LLM tối đa cho 1 câu
@@ -119,45 +120,65 @@ Bạn trả lời câu hỏi của chủ shop bằng cách VIẾT CODE PYTHON (p
     * Nếu kỳ hỏi nằm HOÀN TOÀN ngoài khoảng ngày có dữ liệu, hoặc shop không ghi loại thông tin cần → unanswerable.
 - Tên bảng và tên cột phải chép ĐÚNG như trong mô tả dữ liệu (giữ dấu tiếng Việt, hoa thường, khoảng trắng).
   Mỗi bảng chỉ có các cột được liệt kê dưới bảng đó; cần cột của bảng khác thì merge theo mã đơn / mã hàng.
-- Dùng PERIODS có sẵn, KHÔNG tự viết lại ngày tháng.
+- Dùng PERIODS có sẵn, KHÔNG tự viết lại ngày tháng, KHÔNG tự tạo list/dict khoảng ngày mới.
+  Câu so sánh với kỳ trước: kỳ so sánh đã có sẵn trong PERIODS (xem phần CÂU HỎI).
 - Chỉ dùng dữ liệu trong `tables`. Không đoán.
 
-# VÍ DỤ (tên bảng/cột chỉ minh hoạ, hãy dùng tên thật của shop)
-Câu hỏi: "Doanh thu của Sữa đặc Ông Thọ tháng 5/2025?" — bảng chi tiết có sẵn ngày và trạng thái đơn:
-```python
-p = PERIODS[0]
-ct = tables['DonHang_ChiTiet']
-ct = ct[in_period(ct['Ngày đặt hàng'], p)]
-ct = ct[valid_orders(ct, 'Trạng thái đơn hàng', 'Mã đơn hàng')]   # bỏ đơn huỷ, đơn trả hàng
-ct = ct[match(ct['Tên sản phẩm'], 'Sữa đặc Ông Thọ')]
-print(ct['Tên sản phẩm'].unique()[:5], len(ct))
-ANSWER = {{"type": "number", "answer": round(ct['Tổng tiền'].sum())}}
-```
-Nếu ngày và trạng thái nằm ở bảng đơn hàng (đầu phiếu) còn thành tiền ở bảng chi tiết: lọc bảng đơn hàng trước,
-lấy danh sách mã đơn hợp lệ, rồi lọc bảng chi tiết theo `isin(...)` mã đơn đó:
-```python
-dh = tables['DanhSachHoaDon']
-dh = dh[in_period(dh['Thời gian'], PERIODS[0]) & valid_orders(dh, 'Trạng thái', 'Mã hóa đơn')]
-ct = tables['DanhSachHoaDonChiTiet']
-ct = ct[ct['Mã hóa đơn'].isin(dh['Mã hóa đơn'])]
-```
+# BẢNG CHUẨN `ban_hang_chuan` — DÙNG BẢNG NÀY CHO MỌI CÂU VỀ BÁN HÀNG
+Nếu shop có bảng `tables['ban_hang_chuan']` (xem mô tả ở phần DỮ LIỆU), nó đã được dựng sẵn ĐÚNG rulebook §1 và §8
+từ các bảng bán hàng gốc: đã ghép đơn + chi tiết, chuẩn hoá trạng thái, đánh dấu đơn trả hàng (kể cả trả một phần
+ghi ở bảng khác hoặc ghi số âm), quy số lượng về đơn vị cơ bản. Tên cột cố định:
+  ma_don, ngay (ngày bán của đơn), thoi_diem (ngày giờ tạo đơn), trang_thai ('hoàn thành'/'huỷ'/'trả hàng'/'đang giao'),
+  tra_hang (đơn có trả hàng), tinh_dt (True = dòng TÍNH DOANH THU: đơn không huỷ, không trả),
+  ma_hang, ten_hang, la_phi (True = dòng phí, không phải mặt hàng), nhom_hang, don_vi, so_luong, so_luong_co_ban,
+  don_gia, thanh_tien (thành tiền dòng sau giảm = doanh thu), gia_von (giá vốn 1 đơn vị bán, ghi trên dòng bán),
+  ma_khach, ten_khach, nhom_khach, kenh, nhan_vien (mã), ten_nhan_vien.
+Chỉ những cột có dữ liệu mới có mặt. Câu hỏi về nhập hàng, tồn kho, lô/hạn dùng, công nợ, thanh toán, bảng giá...
+thì dùng các bảng gốc.
 
-# CÔNG THỨC THEO DẠNG CÂU HỎI (làm đúng như sau)
-- DOANH THU / bán được bao nhiêu tiền / thu về: cộng cột THÀNH TIỀN CỦA DÒNG HÀNG (mô tả ghi "thành tiền sau giảm",
-  "thành tiền của dòng", "tiền bán"...) của các đơn hợp lệ (valid_orders), lọc theo NGÀY ĐẶT/ngày bán.
-  KHÔNG dùng "tổng tiền đơn", "tổng sau giảm giá", "phải thu", "khách đã trả", "tiền thu", "thanh toán".
-- SỐ ĐƠN (bao nhiêu đơn, mấy bill): số MÃ ĐƠN KHÁC NHAU (df[cột mã đơn].nunique()) của đơn hợp lệ — KHÔNG đếm số dòng.
-- SỐ ĐƠN BỊ HUỶ: nunique mã đơn có status_of(...) == "huỷ" → type "number".
-  TỈ LỆ HUỶ: số đơn huỷ / số đơn MỌI trạng thái đặt trong kỳ × 100 → type "percent".
-- BÁN CHẠY / top k / hot nhất / bán nhiều nhất: cộng SỐ LƯỢNG QUY VỀ ĐƠN VỊ CƠ BẢN (cột "số lượng đã đổi ra đơn vị cơ bản"
-  nếu có) theo mặt hàng, chỉ đơn hợp lệ; sắp giảm dần, bằng nhau thì mã hàng tăng dần. Đáp án là TÊN HÀNG chép đúng từ dữ liệu.
-  Dòng "Phí phục vụ" không phải mặt hàng.
-- % THAY ĐỔI / tăng giảm bao nhiêu % so với kỳ trước: tính cùng một cách cho PERIODS[0] và kỳ so sánh,
-  (kỳ hỏi − kỳ so) / kỳ so × 100, làm tròn 2 chữ số, type "percent" (giảm thì âm).
-- TỈ TRỌNG (chiếm bao nhiêu %): phần / tổng của CẢ SHOP cùng kỳ × 100 → "percent".
+Công thức (B = tables['ban_hang_chuan'], p = PERIODS[0]):
+- DOANH THU / bán được bao nhiêu tiền:
+    b = B[in_period(B['ngay'], p) & B['tinh_dt']]
+    ANSWER = {{"type": "number", "answer": round(b['thanh_tien'].sum())}}
+- SỐ ĐƠN (bán được mấy đơn): b['ma_don'].nunique() với b như trên (đơn tính doanh thu). KHÔNG đếm số dòng.
+- SỐ ĐƠN HUỶ: B[in_period(B['ngay'], p) & (B['trang_thai'] == 'huỷ')]['ma_don'].nunique() → "number".
+  TỈ LỆ HUỶ = số đơn huỷ / B[in_period(B['ngay'], p)]['ma_don'].nunique() × 100 → "percent".
+  SỐ ĐƠN TRẢ HÀNG: lọc B['tra_hang'].
+- GIÁ TRỊ TRUNG BÌNH MỖI ĐƠN: doanh thu / số đơn tính doanh thu (cùng b).
+- NGÀY BÁN NHIỀU TIỀN NHẤT: b.groupby('ngay')['thanh_tien'].sum().idxmax() → "date" dạng YYYY-MM-DD.
+- BÁN CHẠY / top k / hot nhất / bán nhiều nhất (theo số lượng):
+    g = b[~b['la_phi']].groupby('ten_hang').agg(sl=('so_luong_co_ban', 'sum'), ma=('ma_hang', 'first')).reset_index()
+    g = g.sort_values(['sl', 'ma'], ascending=[False, True])     # bằng nhau: mã hàng tăng dần
+    ANSWER = {{"type": "list", "answer": g['ten_hang'].head(k).tolist()}}
+  (không có cột so_luong_co_ban thì dùng so_luong; không có ma_hang thì bỏ cột 'ma')
+- THEO MẶT HÀNG / NHÓM / KHÁCH / KÊNH / NHÂN VIÊN: lọc thêm bằng match(), KHÔNG so sánh == với chữ tự gõ:
+    b = b[match(b['ten_hang'], 'Sữa đặc Ông Thọ')]      # hoặc match(b['nhom_hang'], 'điện'), match(b['kenh'], 'zalo')
+  THUỐC KÊ ĐƠN: b[b['ke_don']]; theo HOẠT CHẤT: b[b['hoat_chat'].fillna('').str.contains('Cetirizin', case=False)]
+- CA SÁNG / CA CHIỀU (giờ tạo đơn, xem rulebook; train: sáng 06:00–13:59, chiều 14:00–21:59):
+    h = b['thoi_diem'].dt.hour
+    sang = b[(h >= 6) & (h <= 13)];   chieu = b[(h >= 14) & (h <= 21)]
+- ĐƠN CÓ DOANH THU ≥ X (hoặc từ X trở lên): cộng theo đơn TRƯỚC rồi mới so:
+    d = b.groupby('ma_don')['thanh_tien'].sum();   ANSWER = {{"type": "number", "answer": int((d >= X).sum())}}
+- KHÁCH chi nhiều nhất / top khách (§3): có ma_khach thì gộp theo ma_khach (bỏ đơn không có mã = khách lẻ),
+  trả về TÊN khách (ten_khach của mã đó), không trả số tiền:
+    k = b[b['ma_khach'].notna()].groupby('ma_khach').agg(tien=('thanh_tien', 'sum'), ten=('ten_khach', 'first'))
+    k = k.sort_values('tien', ascending=False);   ANSWER = {{"type": "string", "answer": k['ten'].iloc[0]}}
+- GIÁ BÁN của X vào ngày D: đơn giá trên dòng bán X các đơn đặt ngày D (KỂ CẢ đơn huỷ/trả), cho MỘT ĐƠN VỊ CƠ BẢN,
+  trước chiết khấu:   r = B[match(B['ten_hang'], 'X') & (B['ngay'] == pd.Timestamp('YYYY-MM-DD'))]
+    gia = (r['don_gia'] * r['so_luong'] / r['so_luong_co_ban']).round().mode().iloc[0]
+- HIỆU ỨNG TĂNG/ĐỔI GIÁ ngày D, so N ngày: sau = [D, D+N−1], trước = [D−N, D−1] (đọc D, N trong câu);
+  cộng so_luong_co_ban của mặt hàng trên dòng tinh_dt mỗi khoảng; (sau − trước) / trước × 100 → "percent".
+- % THAY ĐỔI so với kỳ trước: tính cùng một cách cho PERIODS[0] và kỳ so sánh, (kỳ hỏi − kỳ so) / kỳ so × 100,
+  làm tròn 2 chữ số, type "percent" (giảm thì âm).
+- TỈ TRỌNG (chiếm bao nhiêu %): phần / tổng doanh thu CẢ SHOP cùng kỳ (kể cả dòng phí) × 100 → "percent".
+- LÃI GỘP (§5): doanh thu − (so_luong × gia_von) trên các dòng tính doanh thu.
 - "THÁNG NÀO": type "date", dạng "YYYY-MM". "NGÀY NÀO": "YYYY-MM-DD".
-- LÃI GỘP (§5): doanh thu trừ giá vốn = số lượng × "giá vốn ghi trên dòng bán" (cột giá vốn của bảng chi tiết bán) nếu có.
 - Trả tên (hàng, khách...) đúng như trong dữ liệu, không bỏ dấu, không xoá khoảng trắng.
+
+# KHI PHẢI DÙNG BẢNG GỐC
+- Trạng thái đơn ghi nhiều kiểu: dùng status_of(...) / valid_orders(df, "cột trạng thái", "cột mã đơn").
+- Cột của CẢ ĐƠN (tổng đơn, khách trả, giảm giá cả đơn...) lặp lại ở mọi dòng hàng: gộp theo mã đơn trước khi cộng.
+- Ngày/trạng thái ở bảng đơn còn chi tiết ở bảng khác: lọc bảng đơn trước, rồi lọc bảng chi tiết bằng isin(mã đơn).
 """
 
 USER_TEMPLATE = """# DỮ LIỆU CỦA SHOP
@@ -200,6 +221,37 @@ def _p_dict(p):
         return None
     return {"label": p.label, "kind": p.kind,
             "start": pd.Timestamp(p.start) if p.start else None, "end": pd.Timestamp(p.end)}
+
+
+_BAN_DESC = {
+    "ma_don": "mã đơn", "ngay": "ngày bán của đơn", "thoi_diem": "ngày giờ tạo đơn", "trang_thai": "trạng thái chuẩn",
+    "tra_hang": "đơn có trả hàng", "tinh_dt": "dòng tính doanh thu (§1)", "dong_tra_hang": "dòng ghi hàng trả (số âm)",
+    "ma_hang": "mã hàng", "ten_hang": "tên hàng", "la_phi": "dòng phí, không phải mặt hàng", "nhom_hang": "nhóm hàng",
+    "don_vi": "đơn vị của dòng", "so_luong": "số lượng theo đơn vị của dòng", "so_luong_co_ban": "số lượng quy về đơn vị cơ bản",
+    "don_gia": "đơn giá", "thanh_tien": "thành tiền dòng sau giảm (doanh thu)", "gia_von": "giá vốn 1 đơn vị bán",
+    "ma_khach": "mã khách", "ten_khach": "tên khách", "nhom_khach": "nhóm khách", "kenh": "kênh bán",
+    "nhan_vien": "mã nhân viên bán", "ten_nhan_vien": "tên nhân viên",
+}
+
+
+def _ban_schema(df, ban):
+    if df is None:
+        return ""
+    src = ban.attrs.get("nguon", {}) if ban is not None else {}
+    lines = [f"## Bảng CHUẨN `ban_hang_chuan`: {len(df):,} dòng, mỗi dòng là {src.get('moi_dong_la', 'một dòng hàng')} "
+             f"(dựng từ `{src.get('dong')}`" + (f" + `{src.get('don')}`" if src.get("don") else "") + "). DÙNG BẢNG NÀY TRƯỚC."]
+    for c in df.columns:
+        s = df[c].dropna()
+        if c in ("trang_thai", "kenh", "nhom_khach", "nhom_hang", "don_vi") and s.nunique() <= 12:
+            ex = ", ".join(map(str, s.value_counts().index[:12]))
+        elif pd.api.types.is_bool_dtype(df[c]):
+            ex = f"True ở {int(s.sum()):,} dòng"
+        elif pd.api.types.is_datetime64_any_dtype(df[c]):
+            ex = f"{s.min():%Y-%m-%d} → {s.max():%Y-%m-%d}" if c == "ngay" else f"vd {s.iloc[0]}"
+        else:
+            ex = "; ".join(map(str, s.astype(str).unique()[:3]))
+        lines.append(f"- `{c}`: {_BAN_DESC.get(c, '')} | {ex[:120]}")
+    return "\n".join(lines) + "\n\n# Các bảng GỐC của shop\n"
 
 
 def _in_period(series, p):
@@ -352,8 +404,25 @@ def _self_check(question, code, tables):
     """Bắt lỗi hay gặp nhất của model nhỏ: tính doanh thu/số đơn/bán chạy mà quên bỏ đơn huỷ, đơn trả.
     Trả về câu nhắc (str) hoặc None. Quy tắc chung cho mọi shop, không theo business_id."""
     q = fold(question)
-    if re.search(r"\bhuy\b|tra hang|tra lai|\bno\b|cong no|nhap|ton kho|ty le|ti le", q):
-        return None                    # câu về huỷ/trả/nợ/nhập/tồn: luật khác, không nhắc
+    # (a) tự viết ngày tháng thay vì dùng PERIODS
+    if re.search(r"""["']start["']\s*:|pd\.Timestamp\(\s*["']20\d\d-\d\d-01["']\s*\)""", code) and "PERIODS" in code \
+            or re.search(r"""["']start["']\s*:\s*pd\.Timestamp""", code):
+        return ("Code đang TỰ VIẾT khoảng ngày (dict 'start'/'end' hoặc pd.Timestamp ngày đầu tháng). Hãy dùng đúng "
+                "PERIODS[0], PERIODS[1]... đã tính sẵn ở phần CÂU HỎI (kỳ so sánh cũng có sẵn trong PERIODS), không tự tạo.")
+    # (b) đếm đơn bằng số dòng
+    if "ban_hang_chuan" in code or re.search(r"\bB\[", code):
+        if (re.search(r"\bdon\b|bill|hoa don", q) and "nunique" not in code
+                and re.search(r"\.shape\[0\]|\blen\(|\.count\(\)|\.size\b", code)):
+            return ("Đếm SỐ ĐƠN phải đếm mã đơn khác nhau: df['ma_don'].nunique(), không đếm số dòng "
+                    "(len / shape[0] / count), vì một đơn có nhiều dòng hàng.")
+    if re.search(r"\bhuy\b|tra hang|tra lai|\bno\b|cong no|nhap|ton kho|ty le|ti le|gia ban|don gia", q):
+        return None                    # câu về huỷ/trả/nợ/nhập/tồn/giá bán: luật khác, không nhắc
+    if "ban_hang_chuan" in code or re.search(r"\bB\[", code):
+        if "tinh_dt" not in code and "trang_thai" not in code and "tra_hang" not in code:
+            return ("Code dùng tables['ban_hang_chuan'] nhưng CHƯA lọc b['tinh_dt'] (bỏ đơn huỷ, đơn trả hàng theo §1). "
+                    "Doanh thu, số đơn, bán chạy, chi tiêu của khách... chỉ tính dòng có tinh_dt == True: "
+                    "thêm  b = b[b['tinh_dt']]  rồi tính lại.")
+        return None
     if "valid_orders" in code or "status_of" in code:
         return None
     used = [t for t in dict.fromkeys(re.findall(r"tables\[['\"]([^'\"]+)['\"]\]", code)) if t in tables]
@@ -369,6 +438,29 @@ def _self_check(question, code, tables):
                         f"Ngay sau khi lấy bảng đó (gọi là df), thêm đúng dòng: df = df[{call}]  "
                         f"(KHÔNG so sánh trực tiếp với chữ 'huỷ'/'trả hàng', vì cột ghi nhiều kiểu khác nhau).")
     return None
+
+
+def _fix_date_type(question, ans):
+    """Câu hỏi "tháng nào"/"ngày nào" mà model trả chuỗi kiểu "tháng 7/2025", "07/2025", "2025-07-05" -> type date."""
+    q = fold(question)
+    if ans.get("type") not in ("string", "number") or not re.search(r"(thang|ngay) nao", q):
+        return ans
+    v = fold(ans.get("answer"))
+    if re.search(r"thang nao", q):
+        m = re.search(r"(\d{4})-(\d{1,2})\b", v) or None
+        if m:
+            return {"type": "date", "answer": f"{int(m[1]):04d}-{int(m[2]):02d}"}
+        m = re.search(r"(\d{1,2})\s*[/-]\s*(\d{4})", v)
+        if m and 1 <= int(m[1]) <= 12:
+            return {"type": "date", "answer": f"{int(m[2]):04d}-{int(m[1]):02d}"}
+    else:
+        m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", v)
+        if m:
+            return {"type": "date", "answer": f"{int(m[1]):04d}-{int(m[2]):02d}-{int(m[3]):02d}"}
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", v)
+        if m:
+            return {"type": "date", "answer": f"{int(m[3]):04d}-{int(m[2]):02d}-{int(m[1]):02d}"}
+    return ans
 
 
 def _restore_names(ans, tables):
@@ -503,7 +595,15 @@ def solve(question: dict, data_dir: str) -> dict:
         p_lines.append(f"- PERIODS[{i}] = {d['label']}: {start} → {d['end']:%Y-%m-%d} (cả hai đầu)")
     p_text = "\n".join(p_lines) or "- (không có mốc thời gian; PERIODS rỗng — đọc câu hỏi và rulebook)"
 
-    env = {"tables": {k: v.copy() for k, v in biz.tables.items()},   # bản sao: code của LLM không làm hỏng cache
+    ban = getattr(biz, "ban", None)
+    if ban is None and not getattr(biz, "_ban_tried", False):
+        biz.ban = ban = build_sales(biz)
+        biz._ban_tried = True
+    tables = {}
+    if ban is not None:
+        tables["ban_hang_chuan"] = ban[[c for c in ban.columns if ban[c].notna().any()]].copy()
+    tables.update({k: v.copy() for k, v in biz.tables.items()})          # bản sao: code của LLM không làm hỏng cache
+    env = {"tables": tables, "B": tables.get("ban_hang_chuan"),
            "pd": pd, "np": np, "re": re, "math": math,
            "TODAY": today, "DATA_END": data_end,
            "PERIODS": plist,
@@ -513,7 +613,7 @@ def solve(question: dict, data_dir: str) -> dict:
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(rulebook=rulebook, max_steps=MAX_STEPS)},
         {"role": "user", "content": USER_TEMPLATE.format(
-            schema=biz.schema_text(), today=question["as_of_date"],
+            schema=_ban_schema(tables.get("ban_hang_chuan"), ban) + biz.schema_text(), today=question["as_of_date"],
             data_end=biz.data_end or "không ghi", periods=p_text, question=question["question"])},
     ]
     thinking_log, codes, outputs = [], [], []
@@ -567,6 +667,7 @@ def solve(question: dict, data_dir: str) -> dict:
                     continue
             if ans is not None:
                 ans = _restore_names(ans, env["tables"])
+                ans = _fix_date_type(question["question"], ans)
                 if ABSTAIN_ZERO and ((ans["type"] in ("number", "percent") and ans["answer"] == 0)
                                      or (ans["type"] in ("list",) and not ans["answer"])):
                     outputs.append(f"Bỏ qua vì đáp án rỗng/bằng 0: {ans}")

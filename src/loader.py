@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 CACHE_DIR = os.environ.get("DATAMATE_CACHE", "/tmp/datamate_cache")
-LOADER_VERSION = "v2.4"
+LOADER_VERSION = "v2.5"
 
 # --------------------------------------------------------------------------- tiện ích chữ
 
@@ -650,6 +650,7 @@ class Business:
     ffill_samples: dict = field(default_factory=dict)   # {bảng: [(cột đã điền, DataFrame mẫu trước khi điền)]}
     dup_rows: dict = field(default_factory=dict)        # {bảng: số dòng trùng y hệt (rulebook §8: tính 1 lần)}
     load_seconds: float = 0.0
+    ban: object = None                                  # bảng bán hàng chuẩn (sales.build_sales), dựng 1 lần cùng cache
 
     def schema_text(self, n_samples: int = 3, max_cols: int = 60, with_notes: bool = True) -> str:
         lines = []
@@ -708,6 +709,8 @@ def _cache_key(path: str) -> str:
             st = os.stat(p)
             h.update(f"{p}|{st.st_size}|{int(st.st_mtime)}".encode())
     h.update(LOADER_VERSION.encode())
+    from sales import SALES_VERSION
+    h.update(SALES_VERSION.encode())
     return h.hexdigest()
 
 
@@ -835,12 +838,16 @@ def load_business(path: str, use_cache: bool = True) -> Business:
         biz.sources[name] = [f"{f}|{s}" if s is not None else f for f, s, _ in items]
         biz.col_meaning[name] = col_mean
 
+    from sales import build_sales                       # import ở đây để tránh vòng lặp import
+    biz.ban = build_sales(biz)
     biz.load_seconds = round(time.time() - t0, 1)
     if use_cache:
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(cache_file, "wb") as f:
+            tmp = f"{cache_file}.{os.getpid()}.tmp"     # ghi file tạm rồi đổi tên: nhiều tiến trình cùng ghi không làm hỏng cache
+            with open(tmp, "wb") as f:
                 pickle.dump(biz, f)
+            os.replace(tmp, cache_file)
         except OSError:
             pass
     return biz

@@ -133,6 +133,14 @@ def test_periods(data):
     def rng(p):
         return (str(p.start) if p and p.start else None, str(p.end) if p else None)
 
+    p = find_periods("dthu tháng 8/2025 hơn hay kém tháng trước bao nhiêu %", "2026-01-10", cal)
+    kiem("'tháng 8/2025 hơn hay kém tháng trước': so với 7/2025 (không phải tháng trước của hôm nay)",
+         len(p) == 1 and str(p[0].meta.get("compare").start) == "2025-07-01", [str(x) for x in p])
+    kiem("'từ ngày 1/1 đến hết hôm nay' = 1/1 → hôm nay",
+         rng(one("Tính từ ngày 1/1 đến hết hôm nay, doanh thu năm nay?", "2026-06-18")) == ("2026-01-01", "2026-06-18"))
+    kiem("'tuần trước' một mình vẫn là cả tuần liền trước",
+         rng(one("doanh thu tuần trước", "2026-06-18")) == ("2026-06-08", "2026-06-14"))
+
     import agent as _ag
     _old_chat = _ag.llm.chat
     seen = {}
@@ -192,6 +200,51 @@ def test_loader_synthetic():
     kiem("ngày cuối dữ liệu từ README", str(b.data_end) == "2025-05-31")
 
 
+def test_sales_synthetic():
+    muc("sales.py: bảng bán hàng chuẩn (đơn + chi tiết, trả hàng ở bảng khác, dòng số âm, quy đổi đơn vị)")
+    from loader import Business
+    from sales import build_sales
+    # shop kiểu "phần mềm": bảng đơn + bảng chi tiết + bảng lô có số lượng trả
+    don = pd.DataFrame({"Mã hóa đơn": ["A1", "A2", "A3", "A4"],
+                        "Thời gian": pd.to_datetime(["2025-05-01 08:10", "2025-05-01 15:00", "2025-05-02 09:00", "2025-05-03 10:00"]),
+                        "Trạng thái": ["Hoàn thành", "Đã hủy", "Hoàn thành", "Hoàn thành"],
+                        "Mã KH": ["KH1", None, "KH2", "KH1"]})
+    ct = pd.DataFrame({"Mã hóa đơn": ["A1", "A1", "A2", "A3", "A4"], "Mã hàng": ["SP1", "SP2", "SP1", "SP1", "SP2"],
+                       "Tên hàng": ["Sữa A", "Bánh B", "Sữa A", "Sữa A", "Bánh B"], "Số lượng": [2.0, 1, 1, 1, 3],
+                       "Đơn giá": [10000.0, 5000, 10000, 10000, 5000], "Thành tiền": [20000.0, 5000, 10000, 10000, 15000]})
+    lo = pd.DataFrame({"Mã hóa đơn": ["A1", "A3", "A4"], "Số lượng trả (ĐVT cơ bản)": [0.0, 1, 0]})
+    kh = pd.DataFrame({"Mã khách hàng": ["KH1", "KH2"], "Tên khách hàng": ["Chị Lan", "Anh Ba"]})
+    b = Business(path="x", tables={"DanhSachHoaDon": don, "DanhSachHoaDonChiTiet": ct, "DanhSachHoaDonChiTietLo": lo,
+                                   "DanhSachKhachHang": kh})
+    ban = build_sales(b)
+    kiem("dựng được bảng", ban is not None and len(ban) == 5, None if ban is None else len(ban))
+    if ban is None:
+        return
+    dt = ban.loc[ban["tinh_dt"], "thanh_tien"].sum()
+    kiem("doanh thu bỏ đơn huỷ (A2) và đơn trả một phần ở bảng lô (A3)", dt == 40000, dt)
+    kiem("ngày lấy từ bảng đơn, bỏ giờ; thoi_diem giữ giờ",
+         ban["ngay"].dt.strftime("%Y-%m-%d").tolist()[:2] == ["2025-05-01"] * 2 and ban["thoi_diem"].dt.hour.iloc[0] == 8)
+    kiem("trạng thái chuẩn", ban.loc[ban["ma_don"] == "A2", "trang_thai"].iloc[0] == "huỷ")
+    kiem("tên khách lấy từ danh mục khách", ban.loc[ban["ma_don"] == "A4", "ten_khach"].iloc[0] == "Chị Lan")
+    # sổ phẳng: trả hàng ghi số âm, ngày trả khác ngày bán; quy đổi theo bảng quy đổi
+    so = pd.DataFrame({"Mã phiếu": ["B1", "B1", "B2", "B2"],
+                       "Ngày lập": pd.to_datetime(["2025-05-01", "2025-05-01", "2025-05-31", "2025-06-02"]),
+                       "Tên SP": ["Bia T", "Mì H", "Bia T", "Bia T"], "Số lượng hàng": [1.0, 2, 2, -1],
+                       "DonVi": ["thùng", "gói", "lon", "lon"], "Tiền": [300000.0, 8000, 20000, -10000],
+                       "Ghi chú TT": ["xong", "xong", "xong", "trả lại"]})
+    qd = pd.DataFrame({"Hàng": ["Bia T"], "ĐV lớn": ["thùng"], "Hệ số QĐ": [24.0]})
+    b2 = Business(path="y", tables={"SoBanHang": so, "DanhMuc": qd},
+                  col_meaning={"DanhMuc": {"Hàng": "tên hàng", "ĐV lớn": "đơn vị lớn", "Hệ số QĐ": "hệ số: số đơn vị cơ bản"}})
+    ban2 = build_sales(b2)
+    kiem("sổ phẳng: dựng được bảng", ban2 is not None and len(ban2) == 4)
+    if ban2 is None:
+        return
+    kiem("đơn có dòng số âm là đơn trả hàng (bỏ cả đơn B2)", ban2.loc[ban2["tinh_dt"], "thanh_tien"].sum() == 308000)
+    kiem("dòng trả mang ngày bán của đơn (31/05), không phải ngày trả",
+         (ban2.loc[ban2["ma_don"] == "B2", "ngay"] == pd.Timestamp("2025-05-31")).all())
+    kiem("quy đổi: 1 thùng Bia T = 24 lon", ban2["so_luong_co_ban"].tolist()[:2] == [24.0, 2.0], ban2["so_luong_co_ban"].tolist())
+
+
 def test_real_data(data, n_biz):
     muc(f"Đọc dữ liệu thật ({n_biz} shop đầu của {data}) + chạy agent với LLM giả")
     from loader import load_business
@@ -223,7 +276,7 @@ def main():
     ap.add_argument("--nhanh", action="store_true", help="bỏ qua phần đọc dữ liệu shop thật")
     ap.add_argument("--so-shop", type=int, default=3)
     a = ap.parse_args()
-    tests = [test_normalize, test_helpers, lambda: test_periods(a.data), test_loader_synthetic,
+    tests = [test_normalize, test_helpers, lambda: test_periods(a.data), test_loader_synthetic, test_sales_synthetic,
              lambda: test_scorer(a.data)]
     if not a.nhanh:
         tests.append(lambda: test_real_data(a.data, a.so_shop))

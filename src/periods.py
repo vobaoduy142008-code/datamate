@@ -304,6 +304,10 @@ _Y = r"(\d{4})"
 _SEP = r"\s*(?:/|-|nam)\s*"
 
 
+def _rel_prev(p: Period) -> Period:
+    return Period(p.start, p.end, p.kind, p.label, {**p.meta, "rel_prev": True})
+
+
 def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[Period]:
     """Trả về các kỳ nhắc tới trong câu theo thứ tự xuất hiện.
     Ngoài ra, nếu câu có 'so với/cùng kỳ/tăng giảm', thêm kỳ so sánh vào meta['compare']."""
@@ -332,6 +336,9 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     # từ ngày X đến (hết) ngày Y
     for m in re.finditer(rf"tu (?:ngay )?{_NUM}/{_NUM}(?:/{_Y})? (?:den|toi) (?:het )?(?:ngay )?{_NUM}/{_NUM}(?:/{_Y})?", s):
         add(m, lambda: date_range(ddmm(m[1], m[2], m[3]), ddmm(m[4], m[5], m[6] or m[3])))
+    # từ ngày X đến (hết) hôm nay / đến nay
+    for m in re.finditer(rf"tu (?:ngay )?{_NUM}/{_NUM}(?:/{_Y})? (?:den|toi) (?:het )?(?:ngay )?(?:hom nay|nay|gio|bay gio)", s):
+        add(m, lambda: date_range(ddmm(m[1], m[2], m[3]), a, m[0]))
     # từ tháng A/Y đến tháng B/Y
     for m in re.finditer(rf"tu thang {_NUM}{_SEP}{_Y} (?:den|toi) (?:het )?thang {_NUM}{_SEP}{_Y}", s):
         add(m, lambda: Period(month(int(m[2]), int(m[1])).start, month(int(m[4]), int(m[3])).end,
@@ -372,8 +379,8 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
         (r"tu dau thang (nay )?den het (ngay )?hom nay|tu dau thang( nay)?|thang nay", lambda: this_month(a)),
         (r"(tu )?dau nam( nay)?( (den|toi) (het )?(ngay )?(hom nay|nay|gio|chu))?", lambda: year_to_date(a)),
         (r"tuan nay", lambda: this_week(a)),
-        (r"tuan (truoc|roi|vua roi)", lambda: last_week(a)),
-        (r"(?<!cung ky )(?<!hon )(?<!voi )thang (truoc|roi|vua roi)(?! do)", lambda: last_month(a)),
+        (r"tuan (truoc|roi|vua roi)", lambda: _rel_prev(last_week(a))),
+        (r"(?<!cung ky )(?<!hon )(?<!voi )thang (truoc|roi|vua roi)(?! do)", lambda: _rel_prev(last_month(a))),
         (r"hom qua", lambda: yesterday(a)),
         (r"hom kia", lambda: day(a - timedelta(days=2), "hôm kia")),
         (r"hom nay", lambda: today(a)),
@@ -397,6 +404,11 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
         add(m, lambda: year(int(m[1])))
 
     periods = [p for _, p in sorted(found, key=lambda t: t[0])]
+    # "tháng 8/2026 hơn hay kém THÁNG TRƯỚC": tháng trước ở đây là kỳ liền trước tháng 8/2026 (kỳ so sánh),
+    # không phải tháng trước của hôm nay -> bỏ, để phần dưới tự tính kỳ so sánh từ kỳ đầu tiên.
+    if (len(periods) >= 2 and re.search(r"so (voi )?|tang|giam|thay doi|hon hay kem|hon|kem|chenh", s)
+            and any(p.meta.get("rel_prev") for p in periods[1:]) and not periods[0].meta.get("rel_prev")):
+        periods = [periods[0]] + [p for p in periods[1:] if not p.meta.get("rel_prev")]
 
     # kỳ so sánh ngầm
     if len(periods) == 1:
