@@ -7,15 +7,20 @@ Model ngôn ngữ đọc câu hỏi, viết code Python (pandas) để tính, ch
 | Mục | Giá trị |
 |---|---|
 | Model duy nhất dùng khi chạy | **Qwen3-8B** (8,2 tỉ tham số), bản lượng tử hoá 4-bit `qwen3:8b` của thư viện Ollama (GGUF Q4_K_M), không fine-tune |
-| Nguồn | https://huggingface.co/Qwen/Qwen3-8B (công bố 04/2025); bản Ollama: https://ollama.com/library/qwen3 |
+| Nguồn | https://huggingface.co/Qwen/Qwen3-8B (công bố 29/04/2025); bản Ollama: https://ollama.com/library/qwen3:8b |
+| Phiên bản cố định | Ollama `qwen3:8b`, ID `500a1f067a9f` (xem `ollama list`; trọng số nằm sẵn trong image tại `/models/ollama`) |
 | Giấy phép | Apache 2.0 |
 | Phần mềm chạy model | Ollama (phiên bản ghi trong lệnh build, trùng với máy của đội) |
 | Model khác (embedding, reranker…) | Không dùng |
-| Huấn luyện / fine-tune | Không. Dữ liệu train chỉ dùng để đo điểm và sửa code. Không dùng dữ liệu public/private test để huấn luyện. |
+| Huấn luyện / fine-tune | Không. Dữ liệu train chỉ dùng để đo điểm, sửa code và dựng 2 bảng tra cứu chữ (thêm dấu, âm tiết) – xem `training_code/README.md`. Không dùng dữ liệu public/private test. |
 | Chế độ sinh | Greedy (temperature 0, seed 0), num_ctx 32768, tắt chế độ suy nghĩ; chạy 1 câu một lúc để kết quả lặp lại được |
 | Mạng | Chạy hoàn toàn offline (`--network none`); model đã nằm sẵn trong image |
 
 Code được đội viết với sự hỗ trợ của trợ lý lập trình AI (Claude) trong lúc phát triển. Khi chạy chấm điểm, **chỉ** dùng Qwen3-8B ở trên, không gọi dịch vụ hay model nào khác.
+
+## Dữ liệu
+- Chỉ bộ train BTC cung cấp (`/code/data/train`: 3000 câu, 30 shop). Không có tập huấn luyện model; toàn bộ train dùng để kiểm tra (đo điểm trên mẫu 50 câu).
+- Dữ liệu sinh ra: `src/ngram_dau.json`, `src/am_tiet.txt` (script + cách chạy lại trong `training_code/README.md`); danh sách file + SHA-256 trong `training_code/data_manifest.json`.
 
 ## Cấu trúc thư mục
 ```

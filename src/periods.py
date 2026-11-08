@@ -310,7 +310,8 @@ def fold(text: str) -> str:
              ("ba", 3), ("tu", 4), ("bon", 4), ("nam", 5), ("bay", 7), ("tam", 8),
              ("chin", 9), ("muoi", 10)]
     for w, n in words:
-        s = re.sub(rf"\bthang {w}\b(?! \d)(?! (nay|truoc|roi|ngoai))", f"thang {n}", s)
+        # "3 tháng từ tháng 7" / "tháng từ ngày..." : "tu" là "từ", không phải tháng tư
+        s = re.sub(rf"(?<!\d )\bthang {w}\b(?! \d)(?! (nay|truoc|roi|ngoai|thang|ngay|tuan|hom|dau|cuoi|quy|nam \d)\b)", f"thang {n}", s)
     return re.sub(r"\s+", " ", s).strip()
 
 # --------------------------------------------------------------------------- dò kỳ trong câu

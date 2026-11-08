@@ -3,7 +3,7 @@
 # Dùng ĐÚNG phiên bản Ollama và đúng model như máy của đội để kết quả chạy lại giống nhau.
 #
 # Build (trên PC, trong thư mục datamate):
-#   docker build --build-arg OLLAMA_VERSION=<số phiên bản, xem `ollama -v` trên Mac> -t datamate:v1 .
+#   docker build --platform linux/amd64 --build-arg OLLAMA_VERSION=<số phiên bản> -t zaic2026_datamate_<ten_doi>:final .
 ARG OLLAMA_VERSION
 FROM ollama/ollama:${OLLAMA_VERSION}
 
@@ -33,10 +33,13 @@ COPY README.md requirements.txt requirements-docker.txt Dockerfile /code/
 COPY scripts /code/scripts
 COPY src /code/src
 COPY docs /code/docs
+COPY training_code /code/training_code
 COPY predict.sh /code/predict.sh
 RUN sed -i 's/\r$//' /code/predict.sh /code/scripts/*.sh && chmod +x /code/predict.sh /code/scripts/*.sh
 # bảng thêm dấu (src/ngram_dau.json) dựng từ data/train ngay lúc build
 RUN rm -f /code/src/ngram_dau.json && cd /code/src && /opt/agent/bin/python -c "import them_dau; m = them_dau.base_model(); print('them_dau', len(m.uni), len(m.bi))"
+# danh sách dữ liệu + SHA-256 (BTC yêu cầu training_code/data_manifest.json)
+RUN /opt/agent/bin/python /code/scripts/tao_manifest.py /code /code/training_code/data_manifest.json
 
 WORKDIR /code
 # Image gốc của Ollama tự chạy "ollama serve"; bỏ đi để BTC chạy đúng /code/predict.sh

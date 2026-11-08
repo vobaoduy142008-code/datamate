@@ -30,7 +30,7 @@ import pandas as pd
 
 from loader import fold
 
-SALES_VERSION = "s15"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
+SALES_VERSION = "s16"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
 
 # ----------------------------------------------------------------------------- trạng thái đơn (rulebook §8)
 ST_HUY = re.compile(r"\bhuy\b|cancel|khong giao duoc|giao that bai|\bthat bai")   # \b: "chuyen" có chứa "huy"!
@@ -322,25 +322,28 @@ def _build(biz):
                 out[col] = out[col].where(out[col].notna(), merged[col])
         used.add(header)
 
+    def _join_catalog():
     # 4) danh mục sản phẩm: bổ sung tên/nhóm/giá vốn theo mã hàng (hoặc nhóm theo tên)
-    for t, (pdf, pr, pm) in info.items():
-        if t in used or len(pdf) > 5000 or "item_code" not in pr and "item_name" not in pr:
-            continue
-        if not ({"group", "cost", "item_name", "rx", "ingredient"} & set(pr)):
-            continue
-        key = "item_code" if ("item_code" in pr and out["ma_hang"].notna().any()) else "item_name"
-        okey = "ma_hang" if key == "item_code" else "ten_hang"
-        if key not in pr or out[okey].isna().all():
-            continue
-        byn = key == "item_name"
-        cat = pdf.assign(_k=_jk(pdf[pr[key]], byn).values).drop_duplicates("_k").set_index("_k")
-        k = _jk(out[okey], byn)
-        if k.isin(cat.index).mean() < 0.5:
-            continue
-        for col, role in [("ten_hang", "item_name"), ("nhom_hang", "group"), ("gia_von", "cost"),
-                          ("ke_don", "rx"), ("hoat_chat", "ingredient")]:
-            if role in pr and (col not in out.columns or out[col].isna().all()):
-                out[col] = k.map(cat[pr[role]]).values
+        for t, (pdf, pr, pm) in info.items():
+            if t in used or len(pdf) > 5000 or "item_code" not in pr and "item_name" not in pr:
+                continue
+            if not ({"group", "cost", "item_name", "rx", "ingredient"} & set(pr)):
+                continue
+            key = "item_code" if ("item_code" in pr and out["ma_hang"].notna().any()) else "item_name"
+            okey = "ma_hang" if key == "item_code" else "ten_hang"
+            if key not in pr or out[okey].isna().all():
+                continue
+            byn = key == "item_name"
+            cat = pdf.assign(_k=_jk(pdf[pr[key]], byn).values).drop_duplicates("_k").set_index("_k")
+            k = _jk(out[okey], byn)
+            if k.isin(cat.index).mean() < 0.5:
+                continue
+            for col, role in [("ten_hang", "item_name"), ("nhom_hang", "group"), ("gia_von", "cost"),
+                              ("ke_don", "rx"), ("hoat_chat", "ingredient")]:
+                if role in pr and (col not in out.columns or out[col].isna().all()):
+                    out[col] = k.map(cat[pr[role]]).values
+
+    _join_catalog()
     # 4b) danh mục khách: tên / nhóm khách theo mã khách
     for t, (cdf, cr, cm) in info.items():
         if t in used or len(cdf) > 20000 or "cust_code" not in cr or out["ma_khach"].isna().all():
@@ -390,6 +393,8 @@ def _build(biz):
                 if out["gia_von"].isna().all() and "cost" in pr:
                     out["gia_von"] = k.map(cat[pr["cost"]]).values
                 break
+    if out["ma_hang"].notna().any():   # 4d vừa có mã hàng: nối lại danh mục theo mã (hoạt chất, kê đơn, nhóm...)
+        _join_catalog()
     # 4e) số lượng quy về đơn vị cơ bản theo bảng quy đổi (đơn vị lớn × hệ số)
     if out["so_luong_co_ban"].isna().all() and out["so_luong"].notna().any():
         for t, (qdf, qr, qm) in info.items():

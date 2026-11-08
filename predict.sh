@@ -38,6 +38,8 @@ export OLLAMA_KEEP_ALIVE=-1
 export OLLAMA_NUM_PARALLEL=1
 export OLLAMA_MAX_LOADED_MODELS=1
 export OLLAMA_NOPRUNE=1
+# chỉ dùng 1 GPU (máy chấm có 2): chạy lại cho cùng kết quả như máy của đội (1 GPU)
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
 PY=${PY:-/opt/agent/bin/python}          # Python riêng của agent (pandas...), cài sẵn trong image
 [ -x "$PY" ] || PY=python3

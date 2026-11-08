@@ -163,6 +163,7 @@ Công thức (B = tables['ban_hang_chuan'], p = PERIODS[0]):
 - CA SÁNG / CA CHIỀU (giờ tạo đơn, xem rulebook; train: sáng 06:00–13:59, chiều 14:00–21:59):
     h = b['thoi_diem'].dt.hour
     sang = b[(h >= 6) & (h <= 13)];   chieu = b[(h >= 14) & (h <= 21)]
+  "Ca chiều tăng/giảm bao nhiêu % SO VỚI CA SÁNG" (cùng một kỳ): (chiều − sáng) / sáng × 100, MỘT số "percent".
 - ĐƠN CÓ DOANH THU ≥ X (hoặc từ X trở lên): cộng theo đơn TRƯỚC rồi mới so:
     d = b.groupby('ma_don')['thanh_tien'].sum();   ANSWER = {{"type": "number", "answer": int((d >= X).sum())}}
 - KHÁCH (§3): luôn dùng cột `khach` = một khách (đã bỏ khách lẻ, đã gom cách viết tên). Đếm khách, khách mua nhiều,
@@ -185,6 +186,10 @@ Công thức (B = tables['ban_hang_chuan'], p = PERIODS[0]):
 - DOANH THU THEO KÊNH / NHÓM KHÁCH (bán tại quầy, qua điện thoại, Zalo OA; khách sỉ, thân thiết...): MỘT SỐ tổng,
   b[match(b['kenh'], 'điện thoại')]['thanh_tien'].sum()   /   b[match(b['nhom_khach'], 'sỉ')]['thanh_tien'].sum()
 - HỎI NHIỀU SỐ trong một câu (doanh thu A và doanh thu B): type "list", mỗi phần tử là MỘT SỐ, đúng thứ tự hỏi: [so_A, so_B].
+- MẶT HÀNG Ế / BÁN CHẬM / KHÔNG BÁN ĐƯỢC CÁI NÀO trong kỳ p (đếm mặt hàng đã từng có trên dòng bán, nhưng trong kỳ không bán được):
+    x = B[~B['la_phi']];  key = 'ma_hang' if 'ma_hang' in x else 'ten_hang'
+    tat_ca = set(x[x['ngay'] <= p['end']][key].dropna());  da_ban = set(x[x['tinh_dt'] & in_period(x['ngay'], p)][key].dropna())
+    ANSWER = {{"type": "number", "answer": len(tat_ca - da_ban)}}
 - BÁN ĐƯỢC BAO NHIÊU <ĐƠN VỊ> (ly, cái, gói, m3...) mà không nêu tên hàng: chỉ các mặt hàng có ĐƠN VỊ CƠ BẢN là đơn vị đó,
   cộng số lượng đã quy về đơn vị cơ bản:   b[b['don_vi_co_ban'].map(norm) == norm('cái')]['so_luong_co_ban'].sum()
 - SIZE M / SIZE L: món có tên KẾT THÚC bằng (M) / (L), không phân biệt hoa thường:
@@ -545,7 +550,7 @@ def _self_check(question, code, tables, plist=None, last=None):
         return ("Số ĐỢT GIAO = số cặp (mã đơn, đợt) khác nhau có ngày giao trong kỳ (mỗi đợt của mỗi đơn tính một đợt): "
                 "g = G[in_period(G['ngay_giao'], PERIODS[0])];  len(g.drop_duplicates(['ma_don', 'dot'])). Không đếm nunique của cột đợt.")
     # (e) công nợ còn lại: phải theo đúng công thức CÒN NỢ (chỉ đơn ghi_no, đơn đặt đến hết ngày X, không in_period)
-    if "cong_no_don" in tables and re.search(r"con no|no qua han|chua tra", q) \
+    if "cong_no_don" in tables and re.search(r"con (cong )?no|no qua han|chua tra( het)? no|dang no", q) \
             and re.search(r"cong_no_don|\bO\[", code) and ("ghi_no" not in code or re.search(r"in_period\([^)]*\['ngay'\]", code)):
         return ("Tính CÒN NỢ đến hết ngày X phải theo đúng công thức §CÔNG NỢ: X = PERIODS[0]['end'];  "
                 "o = O[O['ghi_no'] & ~O['huy'] & (O['ngay'] <= X)].copy();  da_tra = T[T['ngay_tra'] <= X].groupby('ma_don')['so_tien'].sum();  "
@@ -556,6 +561,21 @@ def _self_check(question, code, tables, plist=None, last=None):
             and "sau_ngay_mua" not in code:
         return ("Tiền khách TRẢ NỢ / thu nợ trong kỳ p phải tính từ bảng thu_tien (các lần trả SAU ngày mua của đơn ghi nợ), "
                 "không tính từ ban_hang_chuan: T[T['ghi_no'] & ~T['huy'] & T['sau_ngay_mua'] & in_period(T['ngay_tra'], PERIODS[0])]['so_tien'].sum()")
+    # (g) lọc ngày bằng so sánh tự viết thay vì in_period(..., PERIODS[i])
+    if plist and "in_period" not in last and not re.search(r"cong_no_don|thu_tien|\bO\[|\bT\[", last) \
+            and re.search(r"""\[['"]ngay['"]\]\s*(<=|>=|<|>)""", last):
+        return ("Lọc thời gian phải dùng in_period(cột ngày, PERIODS[i]) với các kỳ đã tính sẵn ở phần CÂU HỎI "
+                "(vd b[in_period(b['ngay'], PERIODS[0])]), không tự so sánh ngày bằng <, <=, ==.")
+    # (h) lãi gộp: giá vốn ghi cho MỘT ĐƠN VỊ BÁN -> nhân so_luong, không nhân so_luong_co_ban
+    if re.search(r"lai gop|loi nhuan|tien lai|\blai\b", q) and "gia_von" in last \
+            and re.search(r"so_luong_co_ban['\"]?\]?\s*\*\s*\w*\[?['\"]?gia_von|gia_von['\"]?\]?\s*\*\s*\w*\[?['\"]?so_luong_co_ban", last):
+        return ("Lãi gộp (§5): gia_von là giá vốn của MỘT ĐƠN VỊ BÁN (cùng đơn vị với don_gia), nên giá vốn dòng = "
+                "b['so_luong'] * b['gia_von'], KHÔNG nhân so_luong_co_ban. Lãi gộp = b['thanh_tien'].sum() - (b['so_luong'] * b['gia_von']).sum().")
+    # (i) câu về MỘT mặt hàng (tăng giá, giá bán...) mà code lọc theo đơn vị thay vì theo tên hàng
+    if "don_vi_co_ban" in last and "ten_hang" not in last and "ma_hang" not in last \
+            and re.search(r"tang gia|giam gia|doi gia|len gia|gia ban|mat hang|\bmon\b", q):
+        return ("Câu hỏi về MỘT mặt hàng cụ thể: phải lọc đúng mặt hàng đó bằng match(b['ten_hang'], 'tên hàng trong câu'), "
+                "rồi cộng so_luong_co_ban. Không lọc theo don_vi_co_ban (công thức đó chỉ dành cho câu KHÔNG nêu tên hàng).")
     # (f) lọc tên bằng chuỗi quá ngắn (vd str.contains('M')) khớp nhầm rất nhiều tên
     short = re.search(r"""str\.contains\(\s*r?(['"])(.{1,2})\1""", last)
     if short and short[2].strip():
@@ -847,6 +867,17 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
     if ban is None and not getattr(biz, "_ban_tried", False):
         biz.ban = ban = build_sales(biz)
         biz._ban_tried = True
+    # kỳ hỏi nằm TRƯỚC ngày đầu tiên có dữ liệu bán của shop -> không có dữ liệu để trả lời (train: 14/14 là unanswerable)
+    try:
+        lo = ban["ngay"].min() if ban is not None and len(ban) else None
+        if lo is not None and pd.notna(lo) and periods and all(
+                p.end is not None and pd.Timestamp(p.end) < lo for p in periods):
+            why = f"Kỳ hỏi kết thúc trước ngày đầu tiên có dữ liệu bán ({lo:%Y-%m-%d})"
+            return {"answer": {"type": "unanswerable", "reason": why}, "thinking": None,
+                    "code": "agent.py::_solve_once (kiểm tra kỳ hỏi so với ngày đầu dữ liệu)",
+                    "output": [why], "steps": 0, "seconds": round(time.time() - t0, 1)}
+    except Exception:
+        pass
     tables = {}
     if ban is not None:
         tables["ban_hang_chuan"] = ban[[c for c in ban.columns if ban[c].notna().any()]].copy()
@@ -944,7 +975,7 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     critiqued += 1
                     # nhắc "yếu" (có thể nhắc nhầm): nếu model giữ nguyên thì vẫn dùng đáp án cũ.
                     # nhắc "chắc" (thiếu lọc tinh_dt, sai khoảng ngày, thiếu cột hoạt chất...): giữ nguyên thì bỏ qua câu.
-                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(")) else None
+                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng")) else None
                     messages.append({"role": "user", "content":
                                      f"Kết quả in ra:\n```\n{out}\n```\nANSWER hiện tại: {ans}\n"
                                      f"KIỂM TRA LẠI: {warn}\nNếu cần sửa thì viết code mới và gán lại ANSWER; "
