@@ -654,6 +654,7 @@ class Business:
     nhap: object = None                                 # bảng nhập hàng chuẩn (sales.build_imports)
     no_don: object = None                               # công nợ theo đơn (sales.build_debt)
     thu_tien: object = None                             # các lần khách trả tiền (sales.build_debt)
+    giao: object = None                                 # sổ giao hàng nhiều đợt (sales.build_delivery)
 
     def schema_text(self, n_samples: int = 3, max_cols: int = 60, with_notes: bool = True) -> str:
         lines = []
@@ -841,10 +842,21 @@ def load_business(path: str, use_cache: bool = True) -> Business:
         biz.sources[name] = [f"{f}|{s}" if s is not None else f for f, s, _ in items]
         biz.col_meaning[name] = col_mean
 
-    from sales import build_sales, build_imports, build_debt   # import ở đây để tránh vòng lặp import
+    from sales import build_sales, build_imports, build_debt, build_delivery   # import ở đây để tránh vòng lặp import
     biz.ban = build_sales(biz)
     biz.nhap = build_imports(biz)
     biz.no_don, biz.thu_tien = build_debt(biz)
+    try:        # hình thức thanh toán của đơn -> thêm vào bảng bán chuẩn (câu "doanh thu các đơn trả bằng chuyển khoản")
+        if biz.ban is not None and biz.no_don is not None and biz.no_don["pttt"].notna().any():
+            pt = biz.no_don.drop_duplicates("ma_don").set_index("ma_don")["pttt"]
+            _vi = {"cash": "tiền mặt", "transfer": "chuyển khoản", "bank transfer": "chuyển khoản", "bank": "chuyển khoản",
+                   "ewallet": "ví điện tử", "e wallet": "ví điện tử", "wallet": "ví điện tử", "card": "thẻ",
+                   "credit card": "thẻ", "debt": "ghi nợ", "credit": "ghi nợ", "cod": "COD"}
+            pt = pt.map(lambda v: _vi.get(re.sub(r"[_\-]+", " ", fold(v)).strip(), v) if pd.notna(v) else v)
+            biz.ban["pttt"] = biz.ban["ma_don"].map(pt).values
+    except Exception as e:
+        biz.warnings.append(f"pttt: lỗi {e!r}")
+    biz.giao = build_delivery(biz)
     biz.load_seconds = round(time.time() - t0, 1)
     if use_cache:
         try:

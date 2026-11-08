@@ -204,6 +204,39 @@ def test_loader_synthetic():
     kiem("ngày cuối dữ liệu từ README", str(b.data_end) == "2025-05-31")
 
 
+def test_chuan_hoa():
+    muc("chuan_hoa.py: diễn giải viết tắt / từ địa phương trong câu hỏi")
+    from chuan_hoa import chuan_hoa
+    cases = {"Dthu th ni bán đc bn z?": "doanh thu tháng này bán được bao nhiêu vậy?",
+             "đơn trên 500k tháng trc": "đơn trên 500.000 đồng tháng trước",
+             "ti le la bnhiu %": "ti le la bao nhiêu phần trăm",
+             "Tháng 4/2026 tỉ lệ đơn bị huỷ": "Tháng 4/2026 tỉ lệ đơn bị huỷ",
+             "son lot jotun jotashield chong kiem 5L": "son lot jotun jotashield chong kiem 5L",
+             "Cà phê đen (M) bán đc bn ly": "Cà phê đen (M) bán được bao nhiêu ly",
+             "Thangs 9/2025 cửa hangf có bao nhiêu đơn bij huỷ": "Tháng 9/2025 cửa hàng có bao nhiêu đơn bị huỷ",
+             "bia Tiger giá max": "bia Tiger giá max",
+             "Kem đánh răng PS, Hảo Hảo tê cay": "Kem đánh răng PS, Hảo Hảo tê cay",
+             "bán được mấy kg nếp": "bán được mấy kg nếp"}
+    bad = {k: chuan_hoa(k) for k, v in cases.items() if chuan_hoa(k) != v}
+    kiem("diễn giải đúng, không làm hỏng tên hàng / 'tỉ lệ' / năm", not bad, bad)
+    from them_dau import them_dau
+    cases = {"thang 1/2026 co may mat hang duoc mua o 246 don khac nhau tro len":
+             "tháng 1/2026 có mấy mặt hàng được mua ở 246 đơn khác nhau trở lên",
+             "Tháng 1/2026 có mấy mặt hàng": "Tháng 1/2026 có mấy mặt hàng"}
+    bad = {k: them_dau(k) for k, v in cases.items() if them_dau(k) != v}
+    kiem("them_dau: thêm dấu câu gõ không dấu, câu có dấu giữ nguyên", not bad, bad)
+    import pandas as pd
+    from agent import _self_check
+    t = {"ban_hang_chuan": pd.DataFrame({"nhom_hang": ["giảm đau hạ sốt"], "ten_hang": ["Cà phê (M)"]}),
+         "giao_hang_chuan": pd.DataFrame({"ma_don": ["A"], "dot": [1]})}
+    ok1 = _self_check("tỉ trọng nhóm giảm đau hạ sốt", "b=tables['ban_hang_chuan'];b=b[b['tinh_dt']];x=b[b['nhom_hang'] == 'giảm đau hạ sốt']", t) is None
+    ok2 = (_self_check("bán mấy ly size M", "b=tables['ban_hang_chuan'];b=b[b['tinh_dt']];b[b['ten_hang'].str.contains('M')]", t) or "").startswith("str.contains(")
+    ok3 = "drop_duplicates" in (_self_check("số đợt giao hàng tháng 1", "G['dot'].nunique()", t) or "")
+    ok4 = "tinh_dt" in (_self_check("tỉ lệ khách mua ít nhất 4 đơn", "b=tables['ban_hang_chuan'];b.groupby('khach')['ma_don'].nunique()", t) or "")
+    kiem("tự kiểm: == đúng chữ trong dữ liệu không nhắc; contains quá ngắn / đợt giao / tỉ lệ khách thiếu tinh_dt có nhắc",
+         ok1 and ok2 and ok3 and ok4, (ok1, ok2, ok3, ok4))
+
+
 def test_sales_synthetic():
     muc("sales.py: bảng bán hàng chuẩn (đơn + chi tiết, trả hàng ở bảng khác, dòng số âm, quy đổi đơn vị)")
     from loader import Business
@@ -282,7 +315,7 @@ def main():
     ap.add_argument("--nhanh", action="store_true", help="bỏ qua phần đọc dữ liệu shop thật")
     ap.add_argument("--so-shop", type=int, default=3)
     a = ap.parse_args()
-    tests = [test_normalize, test_helpers, lambda: test_periods(a.data), test_loader_synthetic, test_sales_synthetic,
+    tests = [test_normalize, test_helpers, lambda: test_periods(a.data), test_loader_synthetic, test_sales_synthetic, test_chuan_hoa,
              lambda: test_scorer(a.data)]
     if not a.nhanh:
         tests.append(lambda: test_real_data(a.data, a.so_shop))

@@ -27,13 +27,16 @@ ARG MODEL=qwen3:8b
 RUN (ollama serve > /tmp/ollama_build.log 2>&1 &) && sleep 8 \
  && ollama pull ${MODEL} && ollama list && ollama show ${MODEL} --modelfile | head -n 5
 
-# 4) Dữ liệu train (dùng để đo điểm; không huấn luyện) và code
+# 4) Dữ liệu train (dùng để đo điểm và dựng bảng thêm dấu cho câu hỏi gõ không dấu; không huấn luyện LLM) và code
 COPY data/train /code/data/train
 COPY README.md requirements.txt requirements-docker.txt Dockerfile /code/
 COPY scripts /code/scripts
 COPY src /code/src
+COPY docs /code/docs
 COPY predict.sh /code/predict.sh
 RUN sed -i 's/\r$//' /code/predict.sh /code/scripts/*.sh && chmod +x /code/predict.sh /code/scripts/*.sh
+# bảng thêm dấu (src/ngram_dau.json) dựng từ data/train ngay lúc build
+RUN rm -f /code/src/ngram_dau.json && cd /code/src && /opt/agent/bin/python -c "import them_dau; m = them_dau.base_model(); print('them_dau', len(m.uni), len(m.bi))"
 
 WORKDIR /code
 # Image gốc của Ollama tự chạy "ollama serve"; bỏ đi để BTC chạy đúng /code/predict.sh

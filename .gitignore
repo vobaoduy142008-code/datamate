@@ -7,3 +7,4 @@ models/
 .DS_Store
 *.tar
 *.md5
+src/ngram_dau.json

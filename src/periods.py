@@ -140,6 +140,21 @@ def quarter(y: int, q: int) -> Period:
     return Period(date(y, m0, 1), _month_end(y, m0 + 2), "quarter", f"quý {q}/{y}")
 
 
+def this_quarter(as_of) -> Period:
+    """Quý này: từ ngày đầu quý đến hết hôm nay (như "tháng này")."""
+    a = _d(as_of)
+    q = (a.month - 1) // 3 + 1
+    return Period(date(a.year, 3 * (q - 1) + 1, 1), a, "quarter_to_date", "quý này")
+
+
+def last_quarter(as_of) -> Period:
+    a = _d(as_of)
+    q = (a.month - 1) // 3 + 1
+    y, q = (a.year, q - 1) if q > 1 else (a.year - 1, 4)
+    p = quarter(y, q)
+    return Period(p.start, p.end, "quarter", "quý trước")
+
+
 def quarter_no_year(q: int, as_of) -> Period:
     a = _d(as_of)
     cur_q = (a.month - 1) // 3 + 1
@@ -277,7 +292,9 @@ def fold(text: str) -> str:
                  (r"\bhnay\b", "hom nay"), (r"\bhqua\b", "hom qua"), (r"\bhkia\b", "hom kia"),
                  (r"\bbua (nay|ni)\b", "hom nay"), (r"\bbua qua\b", "hom qua"),
                  (r"\b(hom|thang|tuan|nam|quy) ni\b", r"\1 nay"),
-                 (r"\bvs\b", "voi"), (r"\bdthu\b", "doanh thu")]:
+                 (r"\bvs\b", "voi"), (r"\bdthu\b", "doanh thu"),
+                 (r"\bq\s?([1-4])\b", r"quy \1"),                      # Q2/2025, q3 -> quý
+                 (r"\b(toi|den) chu\b", r"\1 nay")]:                     # "tới chừ" = tới giờ
         s = re.sub(a, b, s)
     # tháng viết tắt: T8/2026, th3/2025, th 4/25, Th3
     s = re.sub(r"\b(?:th|t)\s?(?=\d{1,2}\s*[/-]\s*\d{2,4}\b)", "thang ", s)
@@ -369,6 +386,8 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     # quý Q/Y, quý Q năm Y
     for m in re.finditer(rf"quy {_NUM}{_SEP}{_Y}", s):
         add(m, lambda: quarter(int(m[2]), int(m[1])))
+    for m in re.finditer(r"quy ([1-4]) (20\d\d)\b", s):          # "quý 2 2025"
+        add(m, lambda: quarter(int(m[2]), int(m[1])))
     # ngày dd/mm/yyyy, dd/mm
     for m in re.finditer(rf"(?:ngay )?{_NUM}/{_NUM}(?:/{_Y})?", s):
         try:
@@ -393,6 +412,8 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
         (r"tu dau thang (nay )?den het (ngay )?hom nay|tu dau thang( nay)?|thang nay", lambda: this_month(a)),
         (r"(tu )?dau nam( nay)?( (den|toi) (het )?(ngay )?(hom nay|nay|gio|chu))?", lambda: year_to_date(a)),
         (r"tuan nay", lambda: this_week(a)),
+        (r"quy nay", lambda: this_quarter(a)),
+        (r"(?<!cung ky )(?<!hon )(?<!voi )quy (truoc|roi|vua roi)", lambda: _rel_prev(last_quarter(a))),
         (r"tuan (truoc|roi|vua roi)", lambda: _rel_prev(last_week(a))),
         (r"(?<!cung ky )(?<!hon )(?<!voi )thang (truoc|roi|vua roi)(?! do)", lambda: _rel_prev(last_month(a))),
         (r"hom qua", lambda: yesterday(a)),

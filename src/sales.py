@@ -30,7 +30,7 @@ import pandas as pd
 
 from loader import fold
 
-SALES_VERSION = "s8"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
+SALES_VERSION = "s15"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
 
 # ----------------------------------------------------------------------------- trạng thái đơn (rulebook §8)
 ST_HUY = re.compile(r"\bhuy\b|cancel|khong giao duoc|giao that bai|\bthat bai")   # \b: "chuyen" có chứa "huy"!
@@ -147,21 +147,58 @@ def _name_key(v):
     return re.sub(r"[^\w]+", " ", unicodedata.normalize("NFC", str(v)).lower()).strip()
 
 
-def _canon_names(names, codes):
+def _item_key(v):
+    """Khoá tên HÀNG: bỏ hoa thường, dấu câu và dấu tiếng Việt ('Tra chanh (M)' = 'Trà chanh (M)')."""
+    return re.sub(r"[^\w]+", " ", fold(v)).strip()
+
+
+def _jk(series, by_name):
+    """Khoá nối bảng: mã thì bỏ khoảng trắng hai đầu; TÊN thì bỏ hoa thường / dấu câu ('ENAT 400 HỘP' = 'Enat 400 Hộp')."""
+    if by_name:
+        return series.map(lambda v: _item_key(v) if pd.notna(v) else None).astype("string")
+    return series.astype("string").str.strip()
+
+
+def _canon_names(names, codes, keyf=None):
+    keyf = keyf or _name_key
     n = pd.Series(names, dtype="object")
     if n.dropna().empty:
         return names
     c = pd.Series(codes, dtype="object")
     use_code = c.notna().mean() > 0.5
-    key = c.where(c.notna(), None) if use_code else n.map(lambda v: _name_key(v) if pd.notna(v) else None)
+    key = c.where(c.notna(), None) if use_code else n.map(lambda v: keyf(v) if pd.notna(v) else None)
     if use_code:      # dòng có tên nhưng thiếu mã: dùng khoá theo tên
-        key = key.where(key.notna(), n.map(lambda v: "~" + _name_key(v) if pd.notna(v) else None))
+        key = key.where(key.notna(), n.map(lambda v: "~" + keyf(v) if pd.notna(v) else None))
     df = pd.DataFrame({"k": key, "n": n}).dropna()
     if df.empty:
         return names
     best = df.groupby(["k", "n"]).size().reset_index(name="c").sort_values(["k", "c", "n"], ascending=[True, False, True])
     best = best.drop_duplicates("k").set_index("k")["n"]
     return key.map(best).where(n.notna(), np.nan).values
+
+
+def _strip_contact(v):
+    """'Dương Hùng Trung - 0328 548 455' / 'Đặng Hải Nhung (0913885954)' -> chỉ lấy tên."""
+    if pd.isna(v):
+        return v
+    t = re.sub(r"\s*[(\[]?\s*(\+?84|0)[\d .-]{8,}\s*[)\]]?\s*$", "", str(v))
+    return re.sub(r"\s*[-–,:|]\s*$", "", t).strip() or np.nan
+
+
+def _guess_name_col(cdf, cr):
+    """Danh mục khách không có cột tên rõ ràng: tìm cột chữ mà giá trị trông như họ tên người (có thể kèm số ĐT)."""
+    best, score = None, 0.0
+    for c in cdf.columns:
+        if c in cr.values() or c == "_nguon" or pd.api.types.is_numeric_dtype(cdf[c]) or pd.api.types.is_datetime64_any_dtype(cdf[c]):
+            continue
+        v = cdf[c].dropna().astype(str)
+        if len(v) < 5 or v.nunique() < 0.7 * len(v):
+            continue
+        nm = v.map(_strip_contact).map(lambda x: str(x) if pd.notna(x) else "")
+        looks = nm.map(lambda x: bool(re.fullmatch(r"[^\W\d_]+( [^\W\d_]+){1,4}", x)) and x[:1].isupper()).mean()
+        if looks > score:
+            best, score = c, looks
+    return (best, _strip_contact) if score >= 0.6 else (None, None)
 
 
 _TIER = re.compile(r"than thiet|\bvip\b|\bsi\b|\ble\b|thuong|\bbac\b|\bvang\b|kim cuong|dong|moi|quen|dai ly|cong ty|doanh nghiep")
@@ -295,8 +332,9 @@ def _build(biz):
         okey = "ma_hang" if key == "item_code" else "ten_hang"
         if key not in pr or out[okey].isna().all():
             continue
-        cat = pdf.drop_duplicates(pr[key]).set_index(pdf.drop_duplicates(pr[key])[pr[key]].astype("string").str.strip())
-        k = out[okey].astype("string").str.strip()
+        byn = key == "item_name"
+        cat = pdf.assign(_k=_jk(pdf[pr[key]], byn).values).drop_duplicates("_k").set_index("_k")
+        k = _jk(out[okey], byn)
         if k.isin(cat.index).mean() < 0.5:
             continue
         for col, role in [("ten_hang", "item_name"), ("nhom_hang", "group"), ("gia_von", "cost"),
@@ -310,6 +348,9 @@ def _build(biz):
         name_col = cr.get("cust_name") or (cr.get("item_name") if "khach" in _tn(t) else None)
         if not name_col and "khach" in _tn(t):
             name_col = next((c for c in cdf.columns if fold(c) in ("kh", "ten", "ho ten", "ho va ten", "tengoi", "khach hang")), None)
+        name_clean = None
+        if not name_col and "khach" in _tn(t):
+            name_col, name_clean = _guess_name_col(cdf, cr)
         if not name_col and _pick_cust_group(cdf, cr) is None:
             continue
         cat = cdf.drop_duplicates(cr["cust_code"])
@@ -318,7 +359,8 @@ def _build(biz):
         if k.dropna().isin(cat.index).mean() < 0.5:
             continue
         if name_col and out["ten_khach"].isna().all():
-            out["ten_khach"] = k.map(cat[name_col]).values
+            names = cat[name_col] if name_clean is None else cat[name_col].map(name_clean)
+            out["ten_khach"] = k.map(names).values
         gcol = _pick_cust_group(cat, cr)
         if gcol is not None and out["nhom_khach"].isna().all():
             out["nhom_khach"] = k.map(cat[gcol]).values
@@ -339,9 +381,8 @@ def _build(biz):
         for t, (pdf, pr, pm) in info.items():
             if t in used or len(pdf) > 5000 or not {"item_code", "item_name"} <= set(pr) or "nhap" in _tn(t):
                 continue
-            cat = pdf.drop_duplicates(pr["item_name"])
-            cat.index = cat[pr["item_name"]].astype("string").str.strip()
-            k = out["ten_hang"].astype("string").str.strip()
+            cat = pdf.assign(_k=_jk(pdf[pr["item_name"]], True).values).drop_duplicates("_k").set_index("_k")
+            k = _jk(out["ten_hang"], True)
             if k.dropna().isin(cat.index).mean() >= 0.8:
                 out["ma_hang"] = k.map(cat[pr["item_code"]]).values
                 if out["nhom_hang"].isna().all() and "group" in pr:
@@ -403,8 +444,16 @@ def _build(biz):
     out["thoi_diem"] = pd.to_datetime(out["thoi_diem"], errors="coerce")
     # Tên hàng / tên khách ghi nhiều kiểu ("RED BULL 250ML", "Red Bull  250ml"): gom về MỘT cách viết
     # (cách viết gặp nhiều nhất) theo mã nếu có mã, không có mã thì theo tên đã bỏ hoa thường/khoảng trắng/dấu câu.
-    out["ten_hang"] = _canon_names(out["ten_hang"], out["ma_hang"])
+    out["ten_hang"] = _canon_names(out["ten_hang"], out["ma_hang"], _item_key)
     out["ten_khach"] = _canon_names(out["ten_khach"], out["ma_khach"])
+    # khach = "một khách" theo §3: shop có mã khách -> mã khách (đơn không mã = khách lẻ -> trống);
+    # shop không có mã -> tên khách (đã gom cách viết); tên kiểu "Khách lẻ" / "vãng lai" -> trống (không phải khách)
+    le = out["ten_khach"].map(lambda v: bool(re.fullmatch(r"(khach )?(le|vang lai)|khach|kl|khach hang le|-|\.|0", fold(v)))
+                              if pd.notna(v) else False).astype(bool)
+    if out["ma_khach"].notna().mean() > 0.05:
+        out["khach"] = out["ma_khach"].where(~le)
+    else:
+        out["khach"] = out["ten_khach"].where(~le)
     if out["ke_don"].notna().any():       # thuốc kê đơn: True/False (dữ liệu ghi True, 1, "Có", "x"...)
         out["ke_don"] = out["ke_don"].map(lambda v: (bool(v) if isinstance(v, (bool, np.bool_, int, float, np.integer))
                                                     else fold(v) in ("co", "x", "true", "yes", "ke don", "rx", "1"))
@@ -414,11 +463,52 @@ def _build(biz):
         lambda v: bool(re.search(r"^(phi |phu thu|tien ship|ship\b)|phi phuc vu|phi van chuyen|phi giao hang", fold(v)))
         if pd.notna(v) else False).astype(bool)
     cols = ["ma_don", "ngay", "thoi_diem", "trang_thai", "tra_hang", "tinh_dt", "dong_tra_hang", "ma_hang", "ten_hang", "la_phi", "nhom_hang", "ke_don", "hoat_chat", "don_vi", "so_luong",
-            "so_luong_co_ban", "don_gia", "thanh_tien", "gia_von", "ma_khach", "ten_khach", "nhom_khach", "kenh", "nhan_vien", "ten_nhan_vien"]
+            "so_luong_co_ban", "don_gia", "thanh_tien", "gia_von", "ma_khach", "ten_khach", "khach", "nhom_khach", "kenh", "nhan_vien", "ten_nhan_vien"]
+    if out["kenh"].notna().any():         # mã kênh tiếng Anh -> cách gọi trong câu hỏi ("tại quầy", "qua điện thoại")
+        _k = {"store": "tại quầy", "offline": "tại quầy", "pos": "tại quầy", "counter": "tại quầy", "phone": "điện thoại",
+              "hotline": "điện thoại", "zalo oa": "Zalo OA", "zalo": "Zalo", "facebook": "Facebook", "fb": "Facebook",
+              "website": "website", "web": "website", "online": "online"}
+        out["kenh"] = out["kenh"].map(lambda v: _k.get(re.sub(r"[_\-]+", " ", fold(v)).strip(), v) if pd.notna(v) else v)
+    try:
+        out["don_vi_co_ban"] = _base_unit(out, info)
+        cols.insert(cols.index("so_luong") , "don_vi_co_ban")
+    except Exception as e:
+        biz.warnings.append(f"don_vi_co_ban: lỗi {e!r}")
     out = out[cols].reset_index(drop=True)
     out.attrs["nguon"] = {"dong": base_t, "don": header if lines is not None else None,
                           "moi_dong_la": "một dòng hàng" if lines is not None else "một đơn"}
     return out
+
+
+def _base_unit(out, info):
+    """Đơn vị cơ bản của từng mặt hàng (rulebook "Bán được bao nhiêu <đơn vị>"): đơn vị của các dòng bán có hệ số 1
+    (so_luong_co_ban == so_luong); hàng chỉ bán theo đơn vị lớn thì lấy cột 'đơn vị cơ bản' của bảng quy đổi / danh mục."""
+    item = out["ma_hang"].where(out["ma_hang"].notna(), out["ten_hang"]).astype("string")
+    q, qb = pd.to_numeric(out["so_luong"], errors="coerce"), pd.to_numeric(out["so_luong_co_ban"], errors="coerce")
+    one = (q > 0) & ((qb - q).abs() < 1e-9) & out["don_vi"].notna()
+    df = pd.DataFrame({"i": item[one], "u": out.loc[one, "don_vi"].astype("string").str.strip()})
+    base = df.groupby(["i", "u"]).size().reset_index(name="n").sort_values(["i", "n"], ascending=[True, False]) \
+        .drop_duplicates("i").set_index("i")["u"].to_dict()
+    # hàng chưa từng bán theo hệ số 1: tìm cột "đơn vị cơ bản" ở các bảng khác (quy đổi / danh mục)
+    miss = set(item.dropna().unique()) - set(base)
+    if miss:
+        by_name = {}
+        for t, (df2, r2, m2) in info.items():
+            bcol = next((c for c in df2.columns if "co ban" in fold(c).replace("_", " ") or "co ban" in fold(m2.get(c, ""))
+                         if not pd.api.types.is_numeric_dtype(df2[c])), None) if isinstance(m2, dict) else None
+            if bcol is None:
+                continue
+            for role in ("item_code", "item_name"):
+                if role in r2:
+                    for a, u in zip(df2[r2[role]], df2[bcol]):
+                        if pd.notna(a) and pd.notna(u):
+                            by_name.setdefault(_item_key(a), str(u).strip())
+        names = dict(zip(item, out["ten_hang"]))
+        for i in miss:
+            u = by_name.get(_item_key(i)) or (by_name.get(_item_key(names.get(i))) if names.get(i) is not None else None)
+            if u:
+                base[i] = u
+    return item.map(base).values
 
 
 def describe(ban):
@@ -544,7 +634,7 @@ def _build_imports(biz):
     out["ngay"] = pd.to_datetime(out["ngay"], errors="coerce").dt.normalize()
     out["huy"] = out["trang_thai_goc"].map(lambda v: status_one(v) == "huỷ" if pd.notna(v) else False).astype(bool)
     out["tinh"] = ~out["huy"]
-    out["ten_hang"] = _canon_names(out["ten_hang"], out["ma_hang"])
+    out["ten_hang"] = _canon_names(out["ten_hang"], out["ma_hang"], _item_key)
     out = out.drop(columns=["trang_thai_goc"])
     out.attrs["nguon"] = {"dong": lt}
     return out
@@ -650,3 +740,64 @@ def _build_debt(biz):
     don = don.reset_index(drop=True)
     don.attrs["nguon"] = hname
     return don, thu
+
+
+# ---------------------------------------------------------------- GIAO HÀNG NHIỀU ĐỢT (rulebook "Giao nhiều đợt")
+def build_delivery(biz):
+    try:
+        return _build_delivery(biz)
+    except Exception as e:
+        biz.warnings.append(f"giao_hang: lỗi {e!r}")
+        return None
+
+
+def _build_delivery(biz):
+    """Bảng sổ giao hàng: mỗi dòng là một mặt hàng giao trong một ĐỢT của một đơn.
+    Nhận diện theo nghĩa cột (chung cho mọi shop): có cột đợt/lần/lượt giao, cột ngày giao, cột mã đơn khớp mã đơn bán."""
+    ban = getattr(biz, "ban", None)
+    if ban is None or not len(ban):
+        return None
+    don_ids = set(ban["ma_don"].dropna().astype(str).str.strip())
+    used = set((ban.attrs.get("nguon") or {}).values())
+    best = None
+    for t, df in biz.tables.items():
+        if t in used or len(df) == 0:
+            continue
+        mean = biz.col_meaning.get(t, {})
+        key = lambda c: (fold(c).replace("_", " ") + " | " + fold(mean.get(c, "")))
+        ctx = _tn(t) + " " + " ".join(key(c) for c in df.columns)
+        if not re.search(r"\bgiao\b|\bcho\b|bien so|\bxe\b|van chuyen", ctx):
+            continue
+        dot = next((c for c in df.columns if re.search(r"\b(luot|lan|dot|chuyen)\b", key(c))
+                    and pd.api.types.is_numeric_dtype(df[c])), None)
+        ngay = next((c for c in df.columns if pd.api.types.is_datetime64_any_dtype(df[c])
+                     and re.search(r"giao|cho|ngay", key(c))), None)
+        if dot is None or ngay is None:
+            continue
+        idc, ov = None, 0.0
+        for c in df.columns:
+            if c in (dot, ngay, "_nguon") or pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_datetime64_any_dtype(df[c]):
+                continue
+            v = df[c].dropna().astype(str).str.strip()
+            if not len(v):
+                continue
+            r = v.isin(don_ids).mean()
+            if r > ov:
+                idc, ov = c, r
+        if idc is None or ov < 0.5:
+            continue
+        if best is None or len(df) > len(best[1]):
+            best = (t, df, idc, dot, ngay, key)
+    if best is None:
+        return None
+    t, df, idc, dot, ngay, key = best
+    out = pd.DataFrame({"ma_don": _norm_id(df[idc]).values, "dot": pd.to_numeric(df[dot], errors="coerce").values,
+                        "ngay_giao": df[ngay].values})
+    for name, pat, num in (("ten_hang", r"ten hang|hang hoa|san pham|mat hang", False),
+                           ("so_luong", r"so luong|\bsl\b", True), ("don_vi", r"don vi|\bdv\b|dvt", False),
+                           ("xe", r"bien so|\bxe\b", False), ("nguoi_giao", r"nguoi (giao|cho)|tai xe|nhan vien", False)):
+        c = next((c for c in df.columns if c not in (idc, dot, ngay) and re.search(pat, key(c))
+                  and (pd.api.types.is_numeric_dtype(df[c]) == num)), None)
+        out[name] = df[c].values if c is not None else np.nan
+    out.attrs["nguon"] = t
+    return out

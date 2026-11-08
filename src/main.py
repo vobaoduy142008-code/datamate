@@ -176,6 +176,7 @@ def main():
                 "output": _join(result.get("output"), "\n----- lượt sau -----\n"),         # kết quả chạy code
                 "error": result.get("error"),
                 "steps": result.get("steps"),
+                "votes": result.get("votes"),           # khi AGENT_VOTE=1: đáp án 2 lần giải
                 "question": q["question"],
                 "business_id": q["business_id"],
             }
