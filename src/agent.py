@@ -586,14 +586,18 @@ def _self_check(question, code, tables, plist=None, last=None):
     q = fold(question)
     last = code if last is None else last          # các lỗi "mẫu code" chỉ xét code mới nhất (code cũ đã sửa thì thôi)
     # (a) tự viết ngày tháng thay vì dùng PERIODS
-    lits = set(re.findall(r"""pd\.Timestamp\(\s*["'](20\d\d-\d\d-\d\d)["']\s*\)""", code))
+    lits = set(re.findall(r"""pd\.Timestamp\(\s*["'](20\d\d-\d\d-\d\d)["']\s*\)""", last))
     allowed = set()
-    for p in plist or []:
-        for k in ("start", "end"):
-            if p.get(k) is not None:
-                allowed.add(p[k].strftime("%Y-%m-%d"))
+    for p0 in plist or []:
+        for p in (p0, p0.get("compare") if isinstance(p0.get("compare"), dict) else None):
+            if not p:
+                continue
+            for k in ("start", "end"):
+                if p.get(k) is not None:
+                    d = pd.Timestamp(p[k])
+                    allowed |= {d.strftime("%Y-%m-%d"), (d + pd.Timedelta(days=1)).strftime("%Y-%m-%d")}
     # chỉ nhắc khi model tự viết khoảng ngày KHÁC với PERIODS (viết lại đúng ngày thì không sao)
-    lits |= set(re.findall(r"""["'](20\d\d-\d\d-\d\d)["']""", code))
+    lits |= set(re.findall(r"""["'](20\d\d-\d\d-\d\d)["']""", last))
     if plist and lits and not lits <= allowed:
         return ("Code đang TỰ VIẾT khoảng ngày (dict 'start'/'end' hoặc pd.Timestamp ngày đầu tháng). Hãy dùng đúng "
                 "PERIODS[0], PERIODS[1]... đã tính sẵn ở phần CÂU HỎI (kỳ so sánh cũng có sẵn trong PERIODS), không tự tạo.")
@@ -1077,7 +1081,7 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     critiqued += 1
                     # nhắc "yếu" (có thể nhắc nhầm): nếu model giữ nguyên thì vẫn dùng đáp án cũ.
                     # nhắc "chắc" (thiếu lọc tinh_dt, sai khoảng ngày, thiếu cột hoạt chất...): giữ nguyên thì bỏ qua câu.
-                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng")) else None
+                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT")) else None
                     messages.append({"role": "user", "content":
                                      f"Kết quả in ra:\n```\n{out}\n```\nANSWER hiện tại: {ans}\n"
                                      f"KIỂM TRA LẠI: {warn}\nNếu cần sửa thì viết code mới và gán lại ANSWER; "
