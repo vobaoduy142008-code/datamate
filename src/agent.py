@@ -577,7 +577,14 @@ def _type_check(question, ans):
     if ans.get("type") in ("list", "table") and _ONE_Q.search(q) and not _MANY_Q.search(q):
         return ("Câu hỏi chỉ hỏi MỘT giá trị: đáp án là MỘT số (type \"number\", hoặc \"percent\" nếu hỏi %), "
                 "không trả danh sách. Tính đúng con số được hỏi rồi gán ANSWER.")
+    # trả % trong khi câu không hỏi % / tăng giảm / tỉ lệ (train: 2380 câu dạng này, không câu nào đáp án là percent)
+    if ans.get("type") == "percent" and not _PCT_Q.search(q):
+        return ("Câu hỏi KHÔNG hỏi phần trăm hay tăng/giảm: đáp án là con số được hỏi (tiền, số lượng...), "
+                "type \"number\", không tính phần trăm.")
     return None
+
+
+_PCT_Q = re.compile(r"%|phan tram|tang|giam|so voi|so vs|ty le|ti le|chiem|ty trong|ti trong|thay doi|chenh")
 
 
 def _self_check(question, code, tables, plist=None, last=None):
@@ -673,6 +680,15 @@ def _self_check(question, code, tables, plist=None, last=None):
         return ("Câu hỏi cộng MỌI mặt hàng theo một đơn vị: chỉ lấy các mặt hàng có ĐƠN VỊ CƠ BẢN là đơn vị đó, "
                 "cộng số lượng đã quy đổi: b[b['don_vi_co_ban'].map(norm) == norm('<đơn vị>')]['so_luong_co_ban'].sum() "
                 "(không lọc theo tên hàng).")
+    # (n) ca sáng / ca chiều mà code không lọc theo giờ
+    if re.search(r"\bca (sang|chieu|toi)\b", q) and "ban_hang_chuan" in tables \
+            and not re.search(r"thoi_diem|\.hour\b|\bgio\b", last):
+        return ("Câu hỏi theo CA: phải lọc theo giờ của thoi_diem (rulebook): h = b['thoi_diem'].dt.hour; "
+                "ca sáng = b[(h >= 6) & (h <= 13)], ca chiều = b[(h >= 14) & (h <= 21)].")
+    # (o) hoạt chất: so khớp ĐÚNG hoạt chất, không contains (thuốc phối hợp nhiều hoạt chất sẽ bị tính nhầm)
+    if re.search(r"""\[['"]hoat_chat['"]\]\.str\.contains""", last):
+        return ("Hoạt chất phải so ĐÚNG tên (không dùng str.contains vì khớp nhầm thuốc phối hợp): "
+                "b[b['hoat_chat'].map(norm) == norm('Ibuprofen')].")
     # (f) lọc tên bằng chuỗi quá ngắn (vd str.contains('M')) khớp nhầm rất nhiều tên
     short = re.search(r"""str\.contains\(\s*r?(['"])(.{1,2})\1""", last)
     if short and short[2].strip():
@@ -1081,7 +1097,8 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     critiqued += 1
                     # nhắc "yếu" (có thể nhắc nhầm): nếu model giữ nguyên thì vẫn dùng đáp án cũ.
                     # nhắc "chắc" (thiếu lọc tinh_dt, sai khoảng ngày, thiếu cột hoạt chất...): giữ nguyên thì bỏ qua câu.
-                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT")) else None
+                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT",
+                                       "Hoạt chất phải so")) else None
                     messages.append({"role": "user", "content":
                                      f"Kết quả in ra:\n```\n{out}\n```\nANSWER hiện tại: {ans}\n"
                                      f"KIỂM TRA LẠI: {warn}\nNếu cần sửa thì viết code mới và gán lại ANSWER; "

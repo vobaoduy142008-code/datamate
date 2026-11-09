@@ -160,6 +160,7 @@ def chuan_hoa(text: str) -> str:
         s = rx.sub(lambda m, u=unit: _money(m, u), s)
     for rx, b in _COMPILED:
         s = rx.sub(b, s)
+    s = re.sub(r"\b(l[aà]) chi(\s*\??\s*)$", r"\1 gì\2", s)      # "... là chi?" (miền Trung) = "là gì?"
     return re.sub(r"\s+", " ", s).strip()
 
 
