@@ -42,6 +42,7 @@ _LUAT = {
     "khong_du": "du lieu phat hanh khong du",
     "gia": "cho mot don vi co ban truoc chiet khau dong",
     "tang_gia": "so so luong don vi co ban n ngay ke tu d",
+    "gia_nhap": "binh quan theo so luong nhap",
 }
 
 
@@ -79,7 +80,7 @@ def try_solve(question, periods, biz, rulebook=None):
     # 6) "doanh thu tháng sau có LUÔN cao hơn / thấp hơn tháng trước không" (các tháng liên tiếp trong kỳ) — train 21/21
     up = re.search(r"(luon|deu|lien tuc)\s*(cao hon|tang|lon hon|nhieu hon)|(cao hon|tang)\s*(lien tuc|deu)|thang sau .*cao hon thang truoc", f)
     down = re.search(r"(luon|deu|lien tuc)\s*(thap hon|giam|it hon)", f)
-    if ban is not None and len(ban) and (up or down) and re.search(r"doanh thu|dthu", f) and re.search(r"khong\s*\??\s*$|phai khong|co phai|dung khong|hay khong", f):
+    if ban is not None and len(ban) and (up or down) and re.search(r"doanh thu|dthu", f) and re.search(r"\b(khong|k|ko|hong)\s*(ha|a|nhi|vay|z)?\s*\??\s*$|phai khong|co phai|dung khong|hay khong", f):
         ms = sorted({m for q in periods for m in pd.period_range(pd.Timestamp(q.start), pd.Timestamp(q.end), freq="M")}) \
             if all(q.start is not None for q in periods) else []
         if len(ms) >= 2:
@@ -131,6 +132,18 @@ def try_solve(question, periods, biz, rulebook=None):
             if before:
                 return {"type": "percent", "answer": round((after - before) / before * 100, 2)}, \
                     f"Số lượng '{names[0]}': {after:g} (N ngày kể từ ngày tăng giá) so với {before:g} (N ngày trước)"
+
+    # 8) GIÁ NHẬP BÌNH QUÂN của X trong kỳ (theo số lượng nhập, bỏ phiếu huỷ) — train 32/32
+    N = getattr(biz, "nhap", None)
+    if N is not None and len(N) and re.search(r"gia nhap (binh quan|trung binh)", f) and _co_luat(rulebook, "gia_nhap"):
+        names = sorted({n for n in N["ten_hang"].dropna().unique() if len(fold(n)) >= 4 and fold(n) in f},
+                       key=len, reverse=True)
+        if names:
+            x = N[N["tinh"] & (N["ten_hang"] == names[0]) & _in(N["ngay"], p, ban)]
+            sl = float(x["so_luong"].sum())
+            if sl:
+                return {"type": "number", "answer": int(round(float(x["thanh_tien"].sum()) / sl))}, \
+                    f"Giá nhập bình quân '{names[0]}' = tổng tiền nhập / tổng số lượng nhập (bỏ phiếu huỷ)"
 
     # 5) GIÁ BÁN mặt hàng X ngày D (đơn giá trên dòng bán ngày D, tính cả đơn huỷ/trả) — train 53/53
     mg = re.search(r"(?:gia|don gia)\b.*?(?:bao nhieu|may)\b.*?(?:mot|1|moi) (\w+)", f) \
