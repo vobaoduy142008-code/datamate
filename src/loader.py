@@ -725,7 +725,9 @@ def load_business(path: str, use_cache: bool = True) -> Business:
     if use_cache and os.path.exists(cache_file):
         try:
             with open(cache_file, "rb") as f:
-                return pickle.load(f)
+                cached = pickle.load(f)
+                if cached.tables:
+                    return cached
         except Exception:
             pass
 
@@ -858,7 +860,7 @@ def load_business(path: str, use_cache: bool = True) -> Business:
         biz.warnings.append(f"pttt: lỗi {e!r}")
     biz.giao = build_delivery(biz)
     biz.load_seconds = round(time.time() - t0, 1)
-    if use_cache:
+    if use_cache and biz.tables:
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
             tmp = f"{cache_file}.{os.getpid()}.tmp"     # ghi file tạm rồi đổi tên: nhiều tiến trình cùng ghi không làm hỏng cache
