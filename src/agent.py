@@ -761,6 +761,8 @@ def normalize_answer(ans):
     t = str(ans["type"]).strip().lower()
     v = ans.get("answer")
     try:
+        if t == "abstain":
+            return {"type": "abstain"}, None
         if t == "unanswerable":
             return {"type": "unanswerable", "reason": str(ans.get("reason") or "")}, None
         if v is None:
@@ -939,7 +941,8 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
         ans = _restore_names(ans, env["tables"])
         ans = _fix_date_type(question["question"], ans)
         if ABSTAIN_ZERO and ((ans["type"] in ("number", "percent") and ans["answer"] == 0)
-                             or (ans["type"] in ("list",) and not ans["answer"])):
+                             or (ans["type"] in ("list",) and not ans["answer"])
+                             or (ans["type"] in ("table",) and not ans["answer"].get("rows"))):
             outputs.append(f"Bỏ qua vì đáp án rỗng/bằng 0: {ans}")
             ans = {"type": "abstain"}
         return {"answer": ans, "thinking": thinking_log or None, "code": "\n\n# ---\n".join(codes),
@@ -1018,8 +1021,8 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                            "Đây là LƯỢT CUỐI: bắt buộc gán ANSWER (hoặc unanswerable nếu dữ liệu không đủ)."))
         messages.append({"role": "user", "content": feedback})
 
-    if pending is not None:                  # hết lượt / hết giờ sau lần tự kiểm: dùng đáp án đã có
-        outputs.append("Hết lượt sau khi tự kiểm -> dùng đáp án trước đó")
-        return finalize(pending, len(codes))
+    if pending is not None:                  # hết lượt / hết giờ sau lần tự kiểm: bỏ qua câu để tránh sai
+        outputs.append("Hết lượt sau khi tự kiểm -> bỏ qua câu (abstain) để tránh sai")
+        return finalize({"type": "abstain"}, len(codes))
     return {"answer": {"type": "abstain"}, "thinking": thinking_log or None, "code": "\n\n# ---\n".join(codes),
             "output": outputs, "steps": len(codes), "seconds": round(time.time() - t0, 1)}
