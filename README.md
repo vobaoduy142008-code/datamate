@@ -1,4 +1,7 @@
 # DataMate – Zalo AI Challenge 2026
+<img width="543" height="126" alt="image" src="https://github.com/user-attachments/assets/579ab841-4525-46b3-a435-3f4e8de0923c" />
+
+<img width="518" height="342" alt="image" src="https://github.com/user-attachments/assets/2baf49a9-e027-4b84-af00-efb56a1a3937" />
 
 Agent trả lời câu hỏi tiếng Việt trên dữ liệu bán hàng của cửa hàng (CSV / Excel / SQLite).
 Model ngôn ngữ đọc câu hỏi, viết code Python (pandas) để tính, chương trình chạy code đó và trả kết quả theo đúng định dạng §9 của rulebook.
