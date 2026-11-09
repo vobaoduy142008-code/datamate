@@ -39,6 +39,7 @@ from loader import fold, load_business
 from sales import build_sales
 from chuan_hoa import chuan_hoa
 from them_dau import them_dau
+import cong_thuc
 from periods import Calendar, find_periods
 
 MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "4"))      # số lượt LLM tối đa cho 1 câu
@@ -343,11 +344,49 @@ def _std_schema(name, df):
     return "\n".join(lines) + "\n"
 
 
+def _patch_str_contains():
+    """str.contains('Sữa tươi (L)') mặc định là regex: '(L)' thành nhóm regex, khớp nhầm mọi tên có chữ L.
+    Model gần như luôn muốn tìm NGUYÊN VĂN -> chuỗi có ngoặc mà không có ký hiệu regex khác thì tìm nguyên văn."""
+    try:
+        from pandas.core.strings.accessor import StringMethods
+    except Exception:
+        return
+    orig = StringMethods.contains
+    if getattr(orig, "_datamate", False):
+        return
+
+    def contains(self, pat, *args, **kw):
+        regex = kw.get("regex", args[3] if len(args) > 3 else True)
+        if regex and isinstance(pat, str) and re.search(r"[()]", pat) and not re.search(r"[|\\\[\]^$]|\.\*|\.\+", pat):
+            if len(args) > 3:
+                args = args[:3] + (False,) + args[4:]
+            else:
+                kw["regex"] = False
+        return orig(self, pat, *args, **kw)
+
+    contains._datamate = True
+    StringMethods.contains = contains
+
+
+_patch_str_contains()
+
+
 def _in_period(series, p):
+    """series nằm trong kỳ p. p: một phần tử PERIODS (dict start/end), hoặc một NGÀY (Timestamp / 'YYYY-MM-DD'),
+    hoặc cặp (từ, đến) — model hay truyền các dạng này, nhận hết cho đỡ lỗi."""
     s = pd.to_datetime(series, errors="coerce").dt.normalize()
-    ok = s <= p["end"]
+    if isinstance(p, (tuple, list)) and len(p) == 2:
+        p = {"start": p[0], "end": p[1]}
+    if not isinstance(p, dict):
+        if hasattr(p, "start") and hasattr(p, "end"):
+            p = {"start": p.start, "end": p.end}
+        else:
+            d = pd.Timestamp(p).normalize()
+            p = {"start": d, "end": d}
+    end = pd.Timestamp(p["end"]).normalize()
+    ok = s <= end
     if p.get("start") is not None:
-        ok &= s >= p["start"]
+        ok &= s >= pd.Timestamp(p["start"]).normalize()
     return ok
 
 
@@ -573,7 +612,7 @@ def _self_check(question, code, tables, plist=None, last=None):
         return ("Số ĐỢT GIAO = số cặp (mã đơn, đợt) khác nhau có ngày giao trong kỳ (mỗi đợt của mỗi đơn tính một đợt): "
                 "g = G[in_period(G['ngay_giao'], PERIODS[0])];  len(g.drop_duplicates(['ma_don', 'dot'])). Không đếm nunique của cột đợt.")
     # (e) công nợ còn lại: phải theo đúng công thức CÒN NỢ (chỉ đơn ghi_no, đơn đặt đến hết ngày X, không in_period)
-    if "cong_no_don" in tables and re.search(r"con (cong )?no|no qua han|chua tra( het)? no|dang no", q) \
+    if "cong_no_don" in tables and re.search(r"con (cong )?no|con thieu|thieu tien|no qua han|chua tra( het)? no|dang no|chua thanh toan", q) \
             and re.search(r"cong_no_don|\bO\[", last) and ("ghi_no" not in last or re.search(r"in_period\([^)]*\['ngay'\]", last)):
         return ("Tính CÒN NỢ đến hết ngày X phải theo đúng công thức §CÔNG NỢ: X = PERIODS[0]['end'];  "
                 "o = O[O['ghi_no'] & ~O['huy'] & (O['ngay'] <= X)].copy();  da_tra = T[T['ngay_tra'] <= X].groupby('ma_don')['so_tien'].sum();  "
@@ -930,6 +969,15 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
             return {"answer": {"type": "unanswerable", "reason": why}, "thinking": None,
                     "code": "agent.py::_solve_once (kiểm tra kỳ hỏi so với ngày đầu dữ liệu)",
                     "output": [why], "steps": 0, "seconds": round(time.time() - t0, 1)}
+    except Exception:
+        pass
+    # loại câu có công thức cố định trong rulebook (đã kiểm trên train: 68/68 câu đúng) -> giải thẳng, không cần LLM
+    try:
+        r = cong_thuc.try_solve(chuan_hoa(question["question"]), periods, biz, rulebook)
+        if r is not None:
+            return {"answer": r[0], "thinking": None, "code": f"cong_thuc.py: {r[1]}",
+                    "output": [f"Giải bằng công thức cố định: {r[1]} -> {r[0].get('answer')}"],
+                    "steps": 0, "seconds": round(time.time() - t0, 1)}
     except Exception:
         pass
     tables = {}
