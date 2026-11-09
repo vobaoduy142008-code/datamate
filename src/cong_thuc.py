@@ -41,6 +41,7 @@ _LUAT = {
     "chay": "theo so luong quy ve don vi co ban",
     "khong_du": "du lieu phat hanh khong du",
     "gia": "cho mot don vi co ban truoc chiet khau dong",
+    "tang_gia": "so so luong don vi co ban n ngay ke tu d",
 }
 
 
@@ -75,6 +76,21 @@ def try_solve(question, periods, biz, rulebook=None):
         return {"type": "unanswerable", "reason": "Dữ liệu của shop không ghi thông tin khách hàng"}, \
             "Shop không có thông tin khách (mọi đơn là khách lẻ)"
 
+    # 6) "doanh thu tháng sau có LUÔN cao hơn / thấp hơn tháng trước không" (các tháng liên tiếp trong kỳ) — train 21/21
+    up = re.search(r"(luon|deu|lien tuc)\s*(cao hon|tang|lon hon|nhieu hon)|(cao hon|tang)\s*(lien tuc|deu)|thang sau .*cao hon thang truoc", f)
+    down = re.search(r"(luon|deu|lien tuc)\s*(thap hon|giam|it hon)", f)
+    if ban is not None and len(ban) and (up or down) and re.search(r"doanh thu|dthu", f) and re.search(r"khong\s*\??\s*$|phai khong|co phai|dung khong|hay khong", f):
+        ms = sorted({m for q in periods for m in pd.period_range(pd.Timestamp(q.start), pd.Timestamp(q.end), freq="M")}) \
+            if all(q.start is not None for q in periods) else []
+        if len(ms) >= 2:
+            x = ban[ban["tinh_dt"]]
+            per = x["ngay"].dt.to_period("M")
+            rev = [float(x.loc[per == m, "thanh_tien"].sum()) for m in ms]
+            ok = all(rev[i + 1] > rev[i] for i in range(len(rev) - 1)) if up else \
+                all(rev[i + 1] < rev[i] for i in range(len(rev) - 1))
+            return {"type": "boolean", "answer": bool(ok)}, \
+                "So doanh thu từng tháng liên tiếp: " + ", ".join(f"{m}: {r:,.0f}" for m, r in zip(ms, rev))
+
     if ban is None or not len(ban) or p is None:
         return None
     b = ban[ban["tinh_dt"] & _in(ban["ngay"], p, ban)]
@@ -99,6 +115,22 @@ def try_solve(question, periods, biz, rulebook=None):
             v = float(x["so_luong_co_ban"].sum())
             return {"type": "number", "answer": int(round(v)) if abs(v - round(v)) < 1e-9 else round(v, 2)}, \
                 f"Cộng so_luong_co_ban các dòng có đơn vị cơ bản '{u}'" + (f", tên kết thúc ({size[1].upper()})" if size else "")
+
+    # 7) HIỆU ỨNG TĂNG GIÁ: số lượng (đơn vị cơ bản) N ngày kể từ D so với N ngày ngay trước — train 66/66
+    cmp = p.meta.get("compare") if isinstance(getattr(p, "meta", None), dict) else None
+    if cmp is not None and "ngay ke tu" in fold(p.label) and re.search(r"(tang|len|doi) gia", f) \
+            and _co_luat(rulebook, "tang_gia") and re.search(r"%|phan tram|tang hay giam|thay doi", f):
+        names = sorted({n for n in ban["ten_hang"].dropna().unique() if len(fold(n)) >= 4 and fold(n) in f},
+                       key=len, reverse=True)
+        if names:
+            x = ban[ban["tinh_dt"] & (ban["ten_hang"] == names[0])]
+            qty = x["so_luong_co_ban"].where(x["so_luong_co_ban"].notna(), x["so_luong"])
+            d = x["ngay"].dt.normalize()
+            after = float(qty[(d >= pd.Timestamp(p.start)) & (d <= pd.Timestamp(p.end))].sum())
+            before = float(qty[(d >= pd.Timestamp(cmp.start)) & (d <= pd.Timestamp(cmp.end))].sum())
+            if before:
+                return {"type": "percent", "answer": round((after - before) / before * 100, 2)}, \
+                    f"Số lượng '{names[0]}': {after:g} (N ngày kể từ ngày tăng giá) so với {before:g} (N ngày trước)"
 
     # 5) GIÁ BÁN mặt hàng X ngày D (đơn giá trên dòng bán ngày D, tính cả đơn huỷ/trả) — train 53/53
     mg = re.search(r"(?:gia|don gia)\b.*?(?:bao nhieu|may)\b.*?(?:mot|1|moi) (\w+)", f) \

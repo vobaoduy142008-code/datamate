@@ -60,6 +60,7 @@ _MAP = [
     (r"p\.mềm|pmềm", "phần mềm", False),
     (r"sđt|sdt", "số điện thoại", False),
     (r"đvvc", "đơn vị vận chuyển", False),
+    (r"ck(?![-/.\d])", "chuyển khoản", False),
     (r"sz", "cỡ", False),
     (r"KH", "khách hàng", True),
     (r"NV|nv", "nhân viên", True),

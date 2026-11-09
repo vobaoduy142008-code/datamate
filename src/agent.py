@@ -680,6 +680,11 @@ def _self_check(question, code, tables, plist=None, last=None):
         return ("Câu hỏi cộng MỌI mặt hàng theo một đơn vị: chỉ lấy các mặt hàng có ĐƠN VỊ CƠ BẢN là đơn vị đó, "
                 "cộng số lượng đã quy đổi: b[b['don_vi_co_ban'].map(norm) == norm('<đơn vị>')]['so_luong_co_ban'].sum() "
                 "(không lọc theo tên hàng).")
+    # (p) nhóm KHÁCH (thân thiết, sỉ, vip...) mà code lọc theo nhóm HÀNG
+    if re.search(r"nhom khach|khach (hang )?nhom|khach (than thiet|si|vip|quen)", q) and "ban_hang_chuan" in tables \
+            and "nhom_khach" not in last:
+        return ("Câu hỏi về NHÓM KHÁCH: lọc theo cột nhom_khach (không phải nhom_hang): "
+                "b[match(b['nhom_khach'], 'thân thiết')].")
     # (n) ca sáng / ca chiều mà code không lọc theo giờ
     if re.search(r"\bca (sang|chieu|toi)\b", q) and "ban_hang_chuan" in tables \
             and not re.search(r"thoi_diem|\.hour\b|\bgio\b", last):
@@ -1035,6 +1040,10 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
     def finalize(ans, step):
         ans = _restore_names(ans, env["tables"])
         ans = _fix_date_type(question["question"], ans)
+        # model ghi "Không có dữ liệu / không tìm thấy thông tin" thành CHUỖI: đúng ý là "không trả lời được"
+        if ans.get("type") == "string" and re.match(
+                r"\s*(khong|chua) (co|tim thay|du|ghi)( du)? (du lieu|thong tin)", fold(str(ans.get("answer", "")))):
+            ans = {"type": "unanswerable", "reason": str(ans.get("answer"))}
         if ABSTAIN_ZERO and ((ans["type"] in ("number", "percent") and ans["answer"] == 0)
                              or (ans["type"] in ("list",) and not ans["answer"])):
             outputs.append(f"Bỏ qua vì đáp án rỗng/bằng 0: {ans}")
