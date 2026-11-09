@@ -331,6 +331,9 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     Ngoài ra, nếu câu có 'so với/cùng kỳ/tăng giảm', thêm kỳ so sánh vào meta['compare']."""
     a = _d(as_of)
     s = fold(question)
+    # "tháng 4 năm trước / năm ngoái" -> tháng 4 của năm (năm hiện tại - 1); "tháng 4 năm nay" -> năm hiện tại
+    s = re.sub(r"\bthang (\d{1,2}) nam (truoc|ngoai)\b", lambda m: f"thang {m[1]}/{a.year - 1}", s)
+    s = re.sub(r"\bthang (\d{1,2}) nam nay\b", lambda m: f"thang {m[1]}/{a.year}", s)
     # "N ngày kể từ ngày D (tính cả D) so với N ngày ngay trước D" (hiệu ứng đổi giá): kỳ hỏi + kỳ so sánh riêng
     mn = re.search(r"(\d+) ngay (?:ke |tinh )?tu (?:ngay )?(?:do|nay|dd|\d)", s)
     md = re.search(rf"(?:ngay )?{_NUM}/{_NUM}(?:/{_Y})?", s)
@@ -420,7 +423,7 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
         (r"hom qua", lambda: yesterday(a)),
         (r"hom kia", lambda: day(a - timedelta(days=2), "hôm kia")),
         (r"hom nay", lambda: today(a)),
-        (r"nam ngoai|nam truoc(?! do)", lambda: year(a.year - 1)),
+        (r"(?<!cung ky )(?<!so voi )(?<!so vs )(?<!so )(?:nam ngoai|nam truoc(?! do))", lambda: year(a.year - 1)),
     ]
     for pat, fn in rel:
         for m in re.finditer(pat, s):
@@ -440,6 +443,8 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
         add(m, lambda: year(int(m[1])))
 
     periods = [p for _, p in sorted(found, key=lambda t: t[0])]
+    seen = set()              # cùng một kỳ nhắc 2 lần ("tuần trước ... so với tuần trước đó") -> giữ 1
+    periods = [p for p in periods if not ((p.start, p.end) in seen or seen.add((p.start, p.end)))]
     # "tháng 8/2026 hơn hay kém THÁNG TRƯỚC": tháng trước ở đây là kỳ liền trước tháng 8/2026 (kỳ so sánh),
     # không phải tháng trước của hôm nay -> bỏ, để phần dưới tự tính kỳ so sánh từ kỳ đầu tiên.
     if (len(periods) >= 2 and re.search(r"so (voi )?|tang|giam|thay doi|hon hay kem|hon|kem|chenh", s)
@@ -450,7 +455,9 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     if len(periods) == 1:
         p = periods[0]
         cmp = None
-        if re.search(r"cung ky nam (truoc|ngoai)|so voi nam (truoc|ngoai)", s):
+        if re.search(r"so (voi |vs )?ca (sang|chieu|toi|dem)", s):
+            cmp = None                       # "ca chiều so với ca sáng": so 2 ca trong CÙNG kỳ, không có kỳ so sánh
+        elif re.search(r"cung ky nam (truoc|ngoai)|so (voi |vs )?nam (truoc|ngoai)", s):
             cmp = same_period_last_year(p, cal)
         elif re.search(r"so (voi )?|cung ky|tang|giam|thay doi|hon hay kem|chenh", s) and p.kind != "snapshot":
             cmp = previous(p, cal)

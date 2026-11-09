@@ -185,6 +185,8 @@ Công thức (B = tables['ban_hang_chuan'], p = PERIODS[0]):
     c = x.groupby(key)['ma_don'].nunique();   ANSWER = {{"type": "number", "answer": int((c >= N).sum())}}
 - DOANH THU THEO KÊNH / NHÓM KHÁCH (bán tại quầy, qua điện thoại, Zalo OA; khách sỉ, thân thiết...): MỘT SỐ tổng,
   b[match(b['kenh'], 'điện thoại')]['thanh_tien'].sum()   /   b[match(b['nhom_khach'], 'sỉ')]['thanh_tien'].sum()
+- "X CHIẾM BAO NHIÊU % DOANH THU" (nhóm hàng, thuốc kê đơn, kênh, khách...): phần của X / TỔNG doanh thu CẢ CỬA HÀNG cùng kỳ × 100:
+    b[match(b['nhom_hang'], 'hoàn thiện')]['thanh_tien'].sum() / b['thanh_tien'].sum() * 100    (kê đơn: b[b['ke_don'] == True])
 - HỎI NHIỀU SỐ trong một câu (doanh thu A và doanh thu B): type "list", mỗi phần tử là MỘT SỐ, đúng thứ tự hỏi: [so_A, so_B].
 - MẶT HÀNG Ế / BÁN CHẬM / KHÔNG BÁN ĐƯỢC CÁI NÀO trong kỳ p (đếm mặt hàng đã từng có trên dòng bán, nhưng trong kỳ không bán được):
     x = B[~B['la_phi']];  key = 'ma_hang' if 'ma_hang' in x else 'ten_hang'
@@ -601,6 +603,33 @@ def _self_check(question, code, tables, plist=None, last=None):
     if re.search(r"""\[['"]ke_don['"]\]""", last) and not re.search(r"ke don|ke toa|theo don|khong can don|otc", q):
         return ("Câu hỏi KHÔNG hỏi thuốc kê đơn: bỏ điều kiện ke_don, chỉ lọc theo đúng điều kiện câu hỏi nêu "
                 "(vd hoạt chất: b[b['hoat_chat'].map(norm) == norm('Vitamin C')]).")
+    # (k) lấy giá trị nhóm/tên bằng .get('chữ gõ tay') / .loc['chữ'] mà chữ đó KHÔNG có nguyên văn trong dữ liệu
+    try:
+        b0 = tables.get("ban_hang_chuan")
+        vals = set()
+        if b0 is not None:
+            for c in ("nhom_hang", "ten_hang", "kenh", "nhom_khach", "hoat_chat", "pttt"):
+                if c in b0:
+                    vals |= set(b0[c].dropna().astype(str))
+        for m in re.finditer(r"""(?:\.get|\.loc|\.at)\s*[\(\[]\s*(['"])(.+?)\1""", last):
+            if vals and m[2] not in vals and (" " in m[2] or not m[2].isascii()):
+                return (f"'{m[2]}' không có nguyên văn trong dữ liệu (sai dấu / hoa thường), nên .get / .loc ra 0. "
+                        f"Hãy lọc dòng bằng match: b[match(b['nhom_hang'], '{m[2]}')] (hoặc cột ten_hang / kenh tương ứng).")
+    except Exception:
+        pass
+    # (l) câu về MỘT khách có tên riêng mà code không lọc theo khách
+    if re.search(r"\bkh[aá]ch\s+(?!h[aà]ng\b|l[eẻ]\b|n[aà]o\b|nh[oó]m\b|quen\b|th[aâ]n\b|s[iỉ]\b|m[oớ]i\b|c[uũ]\b|v[aã]ng\b|đo[aà]n\b|[oở]\b|đ?d?[uư][oờ]ng\b|t[aạ]i\b|khu\b)"
+                 r"[A-ZĐÀ-Ỹ][\wÀ-ỹ]*\s+[A-ZĐÀ-Ỹ]", question) and not re.search(r"khach|ma_don\b.*isin", last):
+        return ("Câu hỏi về MỘT khách cụ thể (có tên riêng): phải lọc theo khách đó, "
+                "vd o = O[match(O['ten_khach'], 'tên khách')], các lần trả: T[T['ma_don'].isin(o['ma_don'])], "
+                "hoặc b[match(b['ten_khach'], 'tên khách')] với bảng bán.")
+    # (m) "cộng mọi mặt hàng tính theo <đơn vị>": phải dùng đơn vị cơ bản
+    mu = re.search(r"tinh theo (?!(so|thang|ngay|tuan|quy|nam|don|khach|ca|gio|kenh|nhom|gia|tien)\b)\w+|"
+                   r"(cong|tat ca|moi|het) (cac )?(mat hang|mon)\b.*(bao nhieu|may) (?!(don|khach|mat|loai|ngay|lan|phan)\b)\w+", q)
+    if mu and "don_vi_co_ban" not in last and "ban_hang_chuan" in tables and not re.search(r"gia|tien|doanh thu|dthu", q):
+        return ("Câu hỏi cộng MỌI mặt hàng theo một đơn vị: chỉ lấy các mặt hàng có ĐƠN VỊ CƠ BẢN là đơn vị đó, "
+                "cộng số lượng đã quy đổi: b[b['don_vi_co_ban'].map(norm) == norm('<đơn vị>')]['so_luong_co_ban'].sum() "
+                "(không lọc theo tên hàng).")
     # (f) lọc tên bằng chuỗi quá ngắn (vd str.contains('M')) khớp nhầm rất nhiều tên
     short = re.search(r"""str\.contains\(\s*r?(['"])(.{1,2})\1""", last)
     if short and short[2].strip():
