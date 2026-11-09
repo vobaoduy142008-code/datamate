@@ -68,7 +68,9 @@ def _solve_one(q):
         llm.TIMEOUT = max(15, min(BASE_LLM_TIMEOUT, budget))
         try:
             result = solve(q, _G["data"])
-        except Exception:
+        except KeyboardInterrupt:
+            raise
+        except BaseException:            # kể cả SystemExit do code của model: không để dừng cả lượt chạy
             result = {"answer": {"type": "abstain"}, "error": traceback.format_exc()}
     if _G["done"] is not None:
         with _G["done"].get_lock():

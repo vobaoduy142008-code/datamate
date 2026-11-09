@@ -369,7 +369,7 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     for m in re.finditer(rf"tu (?:ngay )?{_NUM}/{_NUM}(?:/{_Y})? (?:den|toi) (?:het )?(?:ngay )?{_NUM}/{_NUM}(?:/{_Y})?", s):
         add(m, lambda: date_range(ddmm(m[1], m[2], m[3]), ddmm(m[4], m[5], m[6] or m[3])))
     # từ ngày X đến (hết) hôm nay / đến nay
-    for m in re.finditer(rf"tu (?:ngay )?{_NUM}/{_NUM}(?:/{_Y})? (?:den|toi) (?:het )?(?:ngay )?(?:hom nay|nay|gio|bay gio)", s):
+    for m in re.finditer(rf"tu (?:ngay )?{_NUM}/{_NUM}(?:/{_Y})?(?: nam nay)? (?:den|toi) (?:het )?(?:ngay )?(?:hom nay|nay|gio|bay gio)", s):
         add(m, lambda: date_range(ddmm(m[1], m[2], m[3]), a, m[0]))
     # từ tháng A/Y đến tháng B/Y
     for m in re.finditer(rf"tu thang {_NUM}{_SEP}{_Y} (?:den|toi) (?:het )?thang {_NUM}{_SEP}{_Y}", s):

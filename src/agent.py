@@ -389,6 +389,10 @@ def _canon(v, keep_accents=True):
     return re.sub(r"[^\w]+", " ", t).strip()
 
 
+_FILLER = {"so", "thung", "dia", "ly", "cai", "hop", "chai", "goi", "lon", "bao", "cay", "vien", "tuyp", "mat", "hang",
+           "mon", "san", "pham", "thuoc", "tien", "ban", "loai", "cuon", "bich", "kg", "m3", "xe", "tam", "vi"}
+
+
 def _match(series, text):
     """Series True/False: ô khớp tên `text` (không phân biệt hoa thường, dấu câu, khoảng trắng).
     Thứ tự ưu tiên: khớp đúng cả tên (giữ dấu) -> khớp đúng (bỏ dấu) -> chứa (giữ dấu) -> chứa (bỏ dấu).
@@ -407,11 +411,17 @@ def _match(series, text):
         hit = f.str.contains(re.escape(key), regex=True)
         if hit.any():
             return hit
+    # model hay chép cả chữ thừa ở đầu ("số thùng Chống thấm Kova...", "số đĩa má heo..."): bỏ dần từ đầu, giữ ≥ 2 từ
+    words = str(text).split()
+    if len(words) >= 3 and fold(words[0]) in _FILLER:      # chỉ bỏ chữ đệm (số, thùng, đĩa, ly, món...), không bỏ tên
+        return _match(series, " ".join(words[1:]))
     return pd.Series(False, index=s.index)
 
 
 def _run(code: str, env: dict):
     """Chạy code trong env (dict dùng lại giữa các lượt). -> (kết quả in ra, lỗi hoặc None)."""
+    if re.search(r"\bos\s*\.\s*(_exit|kill|abort|system)\b|\bsignal\s*\.|\bsubprocess\b", code):
+        return "", "Không được dùng os._exit / os.kill / os.system / subprocess / signal. Chỉ tính bằng pandas rồi gán ANSWER."
     buf = io.StringIO()
     err = None
     use_alarm = hasattr(signal, "SIGALRM")
@@ -439,6 +449,8 @@ def _run(code: str, env: dict):
             exec(compile(code, "<code>", "exec"), env)
     except _Timeout:
         err = f"Code chạy quá {CODE_TIMEOUT} giây, hãy viết cách nhanh hơn (tránh vòng lặp từng dòng)."
+    except SystemExit:           # code gọi exit()/sys.exit(): KHÔNG được để dừng cả chương trình
+        err = "Không được gọi exit() / quit() / sys.exit(). Chỉ cần gán ANSWER = {...} rồi kết thúc."
     except Exception as e:
         err = _explain_error(e, code, env)
     finally:
@@ -509,12 +521,21 @@ _COUNT_Q = re.compile(r"\b(dem|bao nhieu|may|tong so|so luong)\s+(so (luong )?)?
 _NOT_COUNT = re.compile(r"liet ke|\bnhung\b|\bnao\b|ke ten|danh sach|\btop\b|chan|\ble\b|\bva\b|moi (khach|nguoi)|tung|lan luot")
 
 
+_ONE_Q = re.compile(r"bao nhieu|\bmay\b|%|phan tram")
+_MANY_Q = re.compile(r"\bva\b|lan luot|\btung\b|\bmoi\b|\bnhung\b|\bnao\b|liet ke|\btop\b|chan|\ble\b|hai so|2 so|ba so|"
+                     r"cac (thang|ngay|tuan|quy)|danh sach|\bvs\b.*\bvs\b|,.*,|tra (duoc|dc)")
+
+
 def _type_check(question, ans):
     """Câu hỏi đếm SỐ LƯỢNG (bao nhiêu khách / mấy mặt hàng / đếm số đơn...) mà model trả cả danh sách."""
     q = fold(question)
     if ans.get("type") in ("list", "table") and _COUNT_Q.search(q) and not _NOT_COUNT.search(q):
         return ("Câu hỏi hỏi SỐ LƯỢNG (đếm), không hỏi danh sách: đáp án phải là MỘT SỐ, "
                 "ANSWER = {\"type\": \"number\", \"answer\": len(danh_sach)} (đếm phần tử khác nhau).")
+    # hỏi MỘT giá trị (bao nhiêu / mấy / %) mà trả danh sách nhiều số (train: 1918 câu dạng này, không câu nào là list)
+    if ans.get("type") in ("list", "table") and _ONE_Q.search(q) and not _MANY_Q.search(q):
+        return ("Câu hỏi chỉ hỏi MỘT giá trị: đáp án là MỘT số (type \"number\", hoặc \"percent\" nếu hỏi %), "
+                "không trả danh sách. Tính đúng con số được hỏi rồi gán ANSWER.")
     return None
 
 
@@ -551,7 +572,7 @@ def _self_check(question, code, tables, plist=None, last=None):
                 "g = G[in_period(G['ngay_giao'], PERIODS[0])];  len(g.drop_duplicates(['ma_don', 'dot'])). Không đếm nunique của cột đợt.")
     # (e) công nợ còn lại: phải theo đúng công thức CÒN NỢ (chỉ đơn ghi_no, đơn đặt đến hết ngày X, không in_period)
     if "cong_no_don" in tables and re.search(r"con (cong )?no|no qua han|chua tra( het)? no|dang no", q) \
-            and re.search(r"cong_no_don|\bO\[", code) and ("ghi_no" not in code or re.search(r"in_period\([^)]*\['ngay'\]", code)):
+            and re.search(r"cong_no_don|\bO\[", last) and ("ghi_no" not in last or re.search(r"in_period\([^)]*\['ngay'\]", last)):
         return ("Tính CÒN NỢ đến hết ngày X phải theo đúng công thức §CÔNG NỢ: X = PERIODS[0]['end'];  "
                 "o = O[O['ghi_no'] & ~O['huy'] & (O['ngay'] <= X)].copy();  da_tra = T[T['ngay_tra'] <= X].groupby('ma_don')['so_tien'].sum();  "
                 "o['no'] = o['tong_don'] - o['ma_don'].map(da_tra).fillna(0);  o = o[o['no'] > 0]  "
@@ -576,6 +597,10 @@ def _self_check(question, code, tables, plist=None, last=None):
             and re.search(r"tang gia|giam gia|doi gia|len gia|gia ban|mat hang|\bmon\b", q):
         return ("Câu hỏi về MỘT mặt hàng cụ thể: phải lọc đúng mặt hàng đó bằng match(b['ten_hang'], 'tên hàng trong câu'), "
                 "rồi cộng so_luong_co_ban. Không lọc theo don_vi_co_ban (công thức đó chỉ dành cho câu KHÔNG nêu tên hàng).")
+    # (j) lọc thuốc kê đơn khi câu hỏi không hỏi kê đơn
+    if re.search(r"""\[['"]ke_don['"]\]""", last) and not re.search(r"ke don|ke toa|theo don|khong can don|otc", q):
+        return ("Câu hỏi KHÔNG hỏi thuốc kê đơn: bỏ điều kiện ke_don, chỉ lọc theo đúng điều kiện câu hỏi nêu "
+                "(vd hoạt chất: b[b['hoat_chat'].map(norm) == norm('Vitamin C')]).")
     # (f) lọc tên bằng chuỗi quá ngắn (vd str.contains('M')) khớp nhầm rất nhiều tên
     short = re.search(r"""str\.contains\(\s*r?(['"])(.{1,2})\1""", last)
     if short and short[2].strip():
