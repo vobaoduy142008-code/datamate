@@ -1,4 +1,7 @@
 # DataMate – Zalo AI Challenge 2026
+<img width="635" height="261" alt="image" src="https://github.com/user-attachments/assets/39d730ff-fdc5-43a9-a83e-e92e7c1f4487" />
+
+
 <img width="543" height="126" alt="image" src="https://github.com/user-attachments/assets/579ab841-4525-46b3-a435-3f4e8de0923c" />
 
 <img width="518" height="342" alt="image" src="https://github.com/user-attachments/assets/2baf49a9-e027-4b84-af00-efb56a1a3937" />
