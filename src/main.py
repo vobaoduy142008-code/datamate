@@ -29,6 +29,10 @@ import re
 import time
 import traceback
 
+import sys
+if sys.platform == "darwin":          # macOS: tiến trình con (fork) không được tra proxy hệ thống (gây crash)
+    os.environ.setdefault("no_proxy", "*")
+    os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
 import agent
 import llm
 from agent import solve
@@ -75,6 +79,49 @@ def _solve_one(q):
     if _G["done"] is not None:
         with _G["done"].get_lock():
             _G["done"].value += 1
+    return q, result, int((time.time() - t0) * 1000)
+
+
+def _child(q, conn):
+    try:
+        conn.send(_solve_one(q)[1])
+    except BaseException:
+        try:
+            conn.send({"answer": {"type": "abstain"}, "error": traceback.format_exc()})
+        except Exception:
+            pass
+    finally:
+        conn.close()
+        os._exit(0)
+
+
+def _solve_isolated(q):
+    """Giải 1 câu trong TIẾN TRÌNH CON (fork). Code của model làm sập tiến trình (hết bộ nhớ, crash thư viện...)
+    thì chỉ mất câu đó (abstain), lượt chạy vẫn tiếp tục. Dữ liệu shop nạp sẵn ở tiến trình cha, con dùng chung."""
+    t0 = time.time()
+    try:
+        agent._business(_G["data"], q["business_id"])     # nạp trước ở cha -> con không phải đọc lại
+    except Exception:
+        pass
+    budget = _budget_for_next()
+    ctx = mp.get_context("fork")
+    parent, child = ctx.Pipe(duplex=False)
+    p = ctx.Process(target=_child, args=(q, child), daemon=True)
+    p.start()
+    child.close()
+    result = None
+    limit = max(30, budget) + 90                          # quá hạn hẳn thì dừng con
+    try:
+        if parent.poll(limit):
+            result = parent.recv()
+    except (EOFError, OSError):
+        result = None
+    if p.is_alive():
+        p.kill()
+    p.join(5)
+    if result is None:
+        result = {"answer": {"type": "abstain"},
+                  "error": f"tiến trình giải câu này bị dừng (mã {p.exitcode}; có thể code của model dùng quá nhiều bộ nhớ)"}
     return q, result, int((time.time() - t0) * 1000)
 
 
@@ -198,7 +245,8 @@ def main():
             for i, q in enumerate(questions, 1):
                 if not args.quiet:
                     print(f"[{i}/{len(questions)}] {q['business_id']}: {q['question'][:90]}", flush=True)
-                _, result, ms = _solve_one(q)
+                _, result, ms = (_solve_isolated(q) if os.environ.get("DATAMATE_ISOLATE", "1") != "0"
+                                 else _solve_one(q))
                 write(i, q, result, ms)
         else:
             ctx = mp.get_context("fork")
