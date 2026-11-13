@@ -27,7 +27,6 @@ Code được đội viết với sự hỗ trợ của trợ lý lập trình A
 datamate/
 ├── predict.sh              # lệnh BTC chạy trong Docker: bật Ollama -> chạy agent -> /result
 ├── Dockerfile              # đóng image nộp bài (Ollama + Qwen3-8B)
-├── Dockerfile.vllm         # (dự phòng) bản vLLM + Qwen3-14B, cần GPU lớn
 ├── requirements.txt        # thư viện khi phát triển trên máy cá nhân
 ├── requirements-docker.txt # thư viện của agent trong Docker (Python 3.12 riêng trong image)
 ├── scripts/

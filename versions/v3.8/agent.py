@@ -51,6 +51,8 @@ VERBOSE = os.environ.get("AGENT_VERBOSE", "1") == "1"          # in tiến độ
 # Đáp án bằng 0 / danh sách rỗng gần như luôn là do code lọc sai (train: chỉ 4/3000 đáp án là 0, không có list rỗng).
 # Sai bị -1 điểm, bỏ qua 0 điểm -> gặp kết quả này thì bỏ qua (abstain).
 ABSTAIN_ZERO = os.environ.get("AGENT_ABSTAIN_ZERO", "1") == "1"
+# 1 = mọi lời nhắc tự kiểm đều "yếu": model giữ nguyên code sau khi được nhắc -> dùng đáp án đã có (không bỏ câu)
+KEEP_PENDING_ALL = os.environ.get("AGENT_KEEP_PENDING_ALL", "0") == "1"
 
 # --------------------------------------------------------------------------- bộ nhớ đệm
 
@@ -1152,8 +1154,8 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     critiqued += 1
                     # nhắc "yếu" (có thể nhắc nhầm): nếu model giữ nguyên thì vẫn dùng đáp án cũ.
                     # nhắc "chắc" (thiếu lọc tinh_dt, sai khoảng ngày, thiếu cột hoạt chất...): giữ nguyên thì bỏ qua câu.
-                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT",
-                                       "Hoạt chất phải so")) else None
+                    pending = ans if (KEEP_PENDING_ALL or warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT",
+                                       "Hoạt chất phải so"))) else None
                     messages.append({"role": "user", "content":
                                      f"Kết quả in ra:\n```\n{out}\n```\nANSWER hiện tại: {ans}\n"
                                      f"KIỂM TRA LẠI: {warn}\nNếu cần sửa thì viết code mới và gán lại ANSWER; "
