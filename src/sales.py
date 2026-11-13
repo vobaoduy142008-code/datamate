@@ -30,7 +30,7 @@ import pandas as pd
 
 from loader import fold
 
-SALES_VERSION = "s16"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
+SALES_VERSION = "s19"          # đổi số này khi sửa file để cache của loader tự dựng lại bảng chuẩn
 
 # ----------------------------------------------------------------------------- trạng thái đơn (rulebook §8)
 ST_HUY = re.compile(r"\bhuy\b|cancel|khong giao duoc|giao that bai|\bthat bai")   # \b: "chuyen" có chứa "huy"!
@@ -62,15 +62,16 @@ def status_of(series):
 _ROLES = [
     ("id", r"^ma don\b|^so don\b", r"^(ma |so )?(hoa don|don hang|don|bill|giao dich|chung tu|ct|phieu|hd)$"
                                    r"|^ma (hoa don|don hang|don|bill|giao dich|chung tu|phieu|gd|hd)\b|^order id$|^mahoadon$"
-                                   r"|^so (phieu|ct|hd|hoa don|chung tu)$|^invoice"),
+                                   r"|^so (phieu|ct|hd|hoa don|chung tu)$|^invoice|^don so$|^so don$"),
     ("date", r"^ngay ban|^thoi diem dat|^ngay dat", r"^(ngay|ngay ban|ngay mua|ngay lap|ngaylap|ngay giao dich|ngay dat hang"
-                                                    r"|ngay thang|thoi gian|ngay_ban|ngay chung tu)$"),
+                                                    r"|ngay thang|thoi gian|ngay_ban|ngay chung tu|ngay hd|ngay hoa don|ngay don|ngay don hang|ngay tao don|ngay lap don)$"),
     ("status", r"^trang thai don", r"^(trang thai|trang thai don hang|tinh trang|tinh trang don|tinhtrang|status|xu ly"
-                                   r"|trang thai xu ly|ket qua|ghi chu tt|trang_thai)$"),
+                                   r"|trang thai xu ly|ket qua|ghi chu tt|trang_thai|trang thai giao|trang thai giao hang)$"),
     ("amount", r"^thanh tien sau giam", r"^(thanh tien|thanh tien \(d\)|t\.?tien|tri gia|trigia|tien ban|amount|tien)$"),
     ("goods", r"^tien hang cua don|^tong tien hang", r"^(tien hang|tong tien hang|tongtienhang)$"),
     ("factor", r"^he so", r"^(ti le quy doi|ty le quy doi|quy doi|bang|he so quy doi|hesoquydoi|he so qd|he so)$"),
-    ("qty_base", r"^so luong da doi ra", r"quy doi|quy ra|^sl le$|^so luong le$|^sl co ban$|^slquydoi$|^sl quy ra le$"),
+    ("qty_base", r"^so luong da doi ra", r"quy doi|quy ra|^sl le$|^so luong le$|^sl co ban$|^slquydoi$|^sl quy ra le$"
+                                         r"|^(sl|so luong) \(?(dv|dvt|don vi|don vi tinh) co ban\)?$"),
     ("qty", r"^so luong$", r"^(so luong|sl|slg|s\.l|soluong|so luong ban|sl ban|so luong san pham|so luong hang)$"),
     ("price", r"^don gia", r"^(don gia|gia ban|gia|gia le|gia 1 dv|giadonvi|gia don vi|price|don gia ban|gia san pham|gia niem yet)$"),
     ("item_code", r"^ma hang", r"^(ma hang|ma sp|ma sku|sku|ma mat hang|ma hh|id sp|mahanghoa|ma_sp|ma hang hoa|ma san pham"
@@ -285,6 +286,20 @@ def _build(biz):
         return src_df[src_r[role]] if role in src_r else None
 
     out["ma_don"] = _norm_id(df[r["id"]]) if "id" in r else pd.Series(pd.NA, index=df.index, dtype="string")
+    # sổ không có mã đơn nhưng có "số thứ tự đơn trong sổ" (README) -> mã đơn = ngày + số thứ tự
+    if "id" not in r and "date" in r:
+        _, _, mm = info[base_t]
+        stt = next((c for c in df.columns if re.search(r"thu tu (don|hoa don)|stt (don|hoa don)", fold(mm.get(c, "")))), None)
+        _nt = re.sub(r"[^a-z0-9 ]+", " ", fold(getattr(biz, "notes", "") or ""))
+        if stt is None and re.search(r"(cung|chung)\s+stt\s+(la\s+)?(mot|1)\s+(don|hoa don)", _nt):
+            stt = next((c for c in df.columns if fold(c).strip() in ("stt", "so thu tu")), None)
+        if stt is not None:
+            d = pd.to_datetime(df[r["date"]], errors="coerce").dt.strftime("%Y-%m-%d")
+            n = pd.to_numeric(df[stt], errors="coerce")
+            ok = d.notna() & n.notna()
+            out["ma_don"] = pd.Series(pd.NA, index=df.index, dtype="string")
+            out.loc[ok, "ma_don"] = (d[ok] + "#" + n[ok].astype("int64").astype(str)).values
+            biz.warnings.append(f"mã đơn ghép từ ngày + '{stt}' ({base_t})")
     for col, role in [("ngay", "date"), ("thoi_diem", "time"), ("trang_thai_goc", "status"), ("ma_hang", "item_code"), ("ten_hang", "item_name"),
                       ("nhom_hang", "group"), ("don_vi", "unit"), ("so_luong", "qty"), ("so_luong_co_ban", "qty_base"),
                       ("don_gia", "price"), ("gia_von", "cost"), ("ma_khach", "cust_code"), ("ten_khach", "cust_name"),
@@ -413,6 +428,24 @@ def _build(biz):
                    for a, u in zip(out[okey], unit)]
             out["so_luong_co_ban"] = pd.to_numeric(out["so_luong"], errors="coerce") * np.array(fac)
             break
+    # 4f) sổ KHÔNG có cột trạng thái: rulebook §8 "trạng thái đơn ghi ở cột Ghi chú; ghi chú không nhắc trạng thái là hoàn thành"
+    if pd.Series(out["trang_thai_goc"]).isna().all():
+        for t_src in [x for x in (lines, header) if x is not None]:
+            sdf = info[t_src][0]
+            notes = [c for c in sdf.columns if re.search(r"ghi chu|note|chu thich", fold(c)) and sdf[c].dtype == object]
+            for c in notes:
+                st = status_of(sdf[c])
+                if (st != "hoàn thành").any():
+                    if t_src == base_t:
+                        out["trang_thai_goc"] = sdf[c].values
+                    elif header is not None and "id" in info[header][1]:
+                        hdf, hr, _ = info[header]
+                        m = dict(zip(_norm_id(hdf[hr["id"]]), hdf[c]))
+                        out["trang_thai_goc"] = out["ma_don"].map(m).values
+                    biz.warnings.append(f"trạng thái đơn lấy từ cột ghi chú '{c}' của {t_src}")
+                    break
+            if not pd.Series(out["trang_thai_goc"]).isna().all():
+                break
     # 5) trạng thái chuẩn + đơn có trả hàng (ghi ở bảng khác: số lượng trả > 0, hoặc bảng phiếu trả hàng)
     out["ngay"] = pd.to_datetime(out["ngay"], errors="coerce").dt.normalize()
     out["trang_thai"] = status_of(out["trang_thai_goc"])
@@ -806,3 +839,32 @@ def _build_delivery(biz):
         out[name] = df[c].values if c is not None else np.nan
     out.attrs["nguon"] = t
     return out
+
+
+# ---------------------------------------------------------------- KIỂM TRA CHẤT LƯỢNG BẢNG CHUẨN
+def ban_health(biz):
+    """(True, []) nếu ban_hang_chuan dùng được; (False, [lý do]) nếu bảng chuẩn KHÔNG đáng tin cho shop này
+    (sổ kiểu lạ: không có ngày, không có mã đơn, trạng thái huỷ/trả nằm trong ghi chú...). Khi đó agent cho model
+    đọc thẳng bảng gốc + README và tắt các công thức dựa trên bảng chuẩn."""
+    ban = getattr(biz, "ban", None)
+    if ban is None or not len(ban):
+        return False, ["không dựng được bảng bán chuẩn"]
+    why = []
+    if ban["ngay"].notna().mean() < 0.95:
+        why.append(f"{ban['ngay'].isna().mean():.0%} dòng không có ngày")
+    if ban["ten_hang"].notna().mean() < 0.5 and ((ban.attrs.get("nguon") or {}).get("moi_dong_la") != "một đơn"
+                                                  or ban["khach"].notna().mean() == 0):
+        why.append("không nhận ra cột tên hàng")
+    # sổ không có cột trạng thái mà ghi chú có nhắc huỷ / trả -> bảng chuẩn đang tính cả đơn huỷ, trả
+    if not (ban["trang_thai"].astype("string").str.contains("huy|tra", regex=True, na=False).any()
+            or ban["tra_hang"].any() or (~ban["tinh_dt"]).any()):
+        t = (ban.attrs.get("nguon") or {}).get("dong")
+        df = biz.tables.get(t) if t else None
+        if df is not None:
+            for c in df.columns:
+                if re.search(r"ghi chu|note|chu thich", fold(c)) and df[c].dtype == object:
+                    v = df[c].dropna().astype(str).map(fold)
+                    if v.str.contains(r"\bhuy\b|tra hang|tra lai|hoan hang|doi tra", regex=True).any():
+                        why.append(f"trạng thái huỷ/trả nằm trong cột '{c}' (bảng chuẩn chưa đọc được)")
+                        break
+    return (not why), why

@@ -40,6 +40,7 @@ from sales import build_sales
 from chuan_hoa import chuan_hoa
 from them_dau import them_dau
 import cong_thuc
+from sales import ban_health
 from periods import Calendar, find_periods
 
 MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "4"))      # số lượt LLM tối đa cho 1 câu
@@ -50,6 +51,8 @@ VERBOSE = os.environ.get("AGENT_VERBOSE", "1") == "1"          # in tiến độ
 # Đáp án bằng 0 / danh sách rỗng gần như luôn là do code lọc sai (train: chỉ 4/3000 đáp án là 0, không có list rỗng).
 # Sai bị -1 điểm, bỏ qua 0 điểm -> gặp kết quả này thì bỏ qua (abstain).
 ABSTAIN_ZERO = os.environ.get("AGENT_ABSTAIN_ZERO", "1") == "1"
+# 1 = mọi lời nhắc tự kiểm đều "yếu": model giữ nguyên code sau khi được nhắc -> dùng đáp án đã có (không bỏ câu)
+KEEP_PENDING_ALL = os.environ.get("AGENT_KEEP_PENDING_ALL", "0") == "1"
 
 # --------------------------------------------------------------------------- bộ nhớ đệm
 
@@ -897,6 +900,60 @@ _VARIANT_NOTE = ("\n\n(LẦN GIẢI ĐỘC LẬP THỨ HAI: tự làm lại từ
                  "bảng/cột đã dùng, bộ lọc kỳ PERIODS, bộ lọc trạng thái (tinh_dt) và đơn vị của đáp án.)")
 
 
+# Công thức cho các luật CHỈ có ở một số rulebook (vd rulebook public: khách trung thành, giờ cao điểm...).
+# Mỗi dòng chỉ đưa vào prompt khi rulebook đang chạy có đúng định nghĩa đó -> rulebook khác (train) prompt không đổi.
+# Hoà nhau: xếp theo giá trị giảm dần rồi theo mã / tên tăng dần (§ thứ tự của rulebook).
+_LUAT_THEM = [
+    ("khach trung thanh nhat", "KHÁCH TRUNG THÀNH NHẤT (nhiều NGÀY có mua nhất): g = b[b['khach'].notna()].groupby('khach')['ngay'].nunique()"),
+    ("khach sop nhat", "KHÁCH SỘP NHẤT (trung bình một đơn cao nhất, chỉ khách ≥ 3 đơn): x = b[b['khach'].notna()]; "
+                       "g = x.groupby('khach').agg(tien=('thanh_tien', 'sum'), don=('ma_don', 'nunique')); g = g[g['don'] >= 3]; g = g['tien'] / g['don']"),
+    ("khach hay doi y nhat", "KHÁCH HAY ĐỔI Ý NHẤT (nhiều đơn HUỶ nhất, dùng B gồm cả đơn huỷ): x = B[in_period(B['ngay'], p) & (B['trang_thai'] == 'huỷ') & B['khach'].notna()]; "
+                             "g = x.groupby('khach')['ma_don'].nunique()"),
+    ("mat hang duoc ua chuong nhat", "MẶT HÀNG ĐƯỢC ƯA CHUỘNG NHẤT (có mặt trong nhiều ĐƠN nhất): x = b[~b['la_phi']]; g = x.groupby('ten_hang')['ma_don'].nunique()"),
+    ("cham chi nhat", "NHÂN VIÊN / THỢ CHĂM CHỈ NHẤT (nhiều NGÀY làm việc nhất): g = b.groupby('nhan_vien')['ngay'].nunique()  "
+                      "(shop ghi tên ở ten_nhan_vien thì groupby cột đó; sổ sửa xe: cột thợ của bảng gốc, kể cả phiếu bảo hành)"),
+    ("ngay dat khach nhat", "NGÀY ĐẮT KHÁCH NHẤT (nhiều ĐƠN nhất): g = b.groupby(b['ngay'].dt.normalize())['ma_don'].nunique()  -> type date YYYY-MM-DD"),
+    ("gio cao diem", "GIỜ CAO ĐIỂM (khung 1 giờ có nhiều đơn nhất, đáp án là GIỜ BẮT ĐẦU, type number): "
+                     "x = b.dropna(subset=['thoi_diem']); g = x.groupby(x['thoi_diem'].dt.hour)['ma_don'].nunique()"),
+    ("nha cung cap chinh", "NHÀ CUNG CẤP CHÍNH (nhiều PHIẾU nhập nhất, bỏ phiếu huỷ; khác nhà cung cấp nhập nhiều tiền nhất): "
+                           "x = N[N['tinh'] & in_period(N['ngay'], p)]; g = x.groupby('ncc')['ma_phieu'].nunique()"),
+    ("trung binh moi ngay thu", "TRUNG BÌNH MỖI NGÀY THỨ X của kỳ: chia cho SỐ NGÀY THỨ X trong kỳ (kể cả ngày không có đơn): "
+                                "d = pd.date_range(p['start'], p['end']); so_ngay = (d.weekday == w).sum()  (thứ 2 → w=0 … chủ nhật → w=6); "
+                                "tong = b[b['ngay'].dt.weekday == w]['thanh_tien'].sum(); tong / so_ngay"),
+]
+
+
+# Câu hỏi nhắc tới luật nào (chữ đã bỏ dấu, gọn khoảng trắng).
+_HOI_LUAT = {
+    "khach trung thanh nhat": r"\btrung thanh\b",
+    "khach sop nhat": r"\bsop nhat\b|\bkhach sop\b",
+    "khach hay doi y nhat": r"\bdoi y\b",
+    "mat hang duoc ua chuong nhat": r"\bua chuong\b",
+    "cham chi nhat": r"\bcham chi\b",
+    "ngay dat khach nhat": r"\bdat khach\b",
+    "gio cao diem": r"\bcao diem\b",
+    "nha cung cap chinh": r"\bnha cung cap chinh\b|\bncc chinh\b",
+    "trung binh moi ngay thu": r"\bmoi (ngay )?(thu (hai|ba|tu|nam|sau|bay|[2-7])|chu nhat|cn)\b",
+}
+
+
+def _gon(s):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", fold(s or "")))
+
+
+def _luat_them(rulebook, question=""):
+    """Các dòng công thức của _LUAT_THEM mà rulebook đang chạy có định nghĩa VÀ câu hỏi đang hỏi đúng luật đó.
+    v3.9 đưa cả khối vào MỌI câu -> prompt đổi -> ~150 câu không liên quan đổi đáp án, public 0,358 -> 0,332.
+    v3.10: câu không hỏi luật nào -> prompt y hệt v3.7."""
+    t, q = _gon(rulebook), _gon(question)
+    rows = [f"- {f}" for k, f in _LUAT_THEM if k in t and re.search(_HOI_LUAT[k], q)]
+    if not rows:
+        return ""
+    return ("\n# CÔNG THỨC CHO CÁC LUẬT RIÊNG CỦA RULEBOOK NÀY (b = B đã lọc kỳ p và tinh_dt; "
+            "xếp hạng: g.sort_values(ascending=False), hoà nhau thì theo mã / tên tăng dần; trả TÊN / giá trị đứng đầu)\n"
+            + "\n".join(rows) + "\n")
+
+
 def _shop_texts(biz):
     """Chữ có dấu của chính shop (tên hàng, nhóm hàng, README) để thêm dấu đúng cho câu hỏi gõ không dấu."""
     out = [getattr(biz, "notes", "") or ""]
@@ -985,6 +1042,13 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
     if ban is None and not getattr(biz, "_ban_tried", False):
         biz.ban = ban = build_sales(biz)
         biz._ban_tried = True
+    # CỔNG CHẤT LƯỢNG: bảng chuẩn không đáng tin cho shop này (sổ kiểu lạ) -> model đọc bảng gốc, tắt công thức cố định
+    try:
+        ban_ok, ban_why = ban_health(biz)
+    except Exception as e:
+        ban_ok, ban_why = False, [f"lỗi kiểm tra bảng chuẩn: {e!r}"]
+    if not ban_ok:
+        ban = None
     # kỳ hỏi nằm TRƯỚC ngày đầu tiên có dữ liệu bán của shop -> không có dữ liệu để trả lời (train: 14/14 là unanswerable)
     try:
         lo = ban["ngay"].min() if ban is not None and len(ban) else None
@@ -996,9 +1060,20 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     "output": [why], "steps": 0, "seconds": round(time.time() - t0, 1)}
     except Exception:
         pass
-    # loại câu có công thức cố định trong rulebook (đã kiểm trên train: 68/68 câu đúng) -> giải thẳng, không cần LLM
+    # câu hỏi thông tin mà dữ liệu shop KHÔNG có (giới tính, địa chỉ, đánh giá nhân viên, không có bảng nhập / tồn /
+    # công nợ / hạn dùng) -> unanswerable theo rulebook "dữ liệu không đủ". Train: 31/31 câu đúng, 0 nhận nhầm.
     try:
-        r = cong_thuc.try_solve(chuan_hoa(question["question"]), periods, biz, rulebook)
+        why = cong_thuc.khong_du_du_lieu(chuan_hoa(question["question"]), biz) \
+            if cong_thuc._co_luat(rulebook, "khong_du") else None
+        if why:
+            return {"answer": {"type": "unanswerable", "reason": why}, "thinking": None,
+                    "code": "cong_thuc.py::khong_du_du_lieu", "output": [why], "steps": 0,
+                    "seconds": round(time.time() - t0, 1)}
+    except Exception:
+        pass
+    # loại câu có công thức cố định trong rulebook (đã kiểm trên train) -> giải thẳng, không cần LLM
+    try:
+        r = None if not ban_ok else cong_thuc.try_solve(chuan_hoa(question["question"]), periods, biz, rulebook)
         if r is not None:
             return {"answer": r[0], "thinking": None, "code": f"cong_thuc.py: {r[1]}",
                     "output": [f"Giải bằng công thức cố định: {r[1]} -> {r[0].get('answer')}"],
@@ -1027,7 +1102,11 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(rulebook=rulebook, max_steps=MAX_STEPS)},
         {"role": "user", "content": USER_TEMPLATE.format(
-            schema=(_ban_schema(tables.get("ban_hang_chuan"), ban)
+            schema=(("" if ban_ok else
+                     "## (KHÔNG có bảng chuẩn ban_hang_chuan cho shop này: " + "; ".join(ban_why) + ". "
+                     "Hãy đọc README và dùng trực tiếp các bảng GỐC bên dưới; tự lọc trạng thái huỷ/trả theo rulebook.)\n")
+                    + _ban_schema(tables.get("ban_hang_chuan"), ban)
+                    + (_luat_them(rulebook, chuan_hoa(question["question"])) if ban_ok else "")
                     + "".join(_std_schema(n, tables.get(n)) for n in ("nhap_hang_chuan", "cong_no_don", "thu_tien", "giao_hang_chuan"))
                     + "\n# Các bảng GỐC của shop\n" + biz.schema_text()), today=question["as_of_date"],
             data_end=biz.data_end or "không ghi", periods=p_text, question=_q_with_note(question["question"], biz))
@@ -1106,8 +1185,8 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     critiqued += 1
                     # nhắc "yếu" (có thể nhắc nhầm): nếu model giữ nguyên thì vẫn dùng đáp án cũ.
                     # nhắc "chắc" (thiếu lọc tinh_dt, sai khoảng ngày, thiếu cột hoạt chất...): giữ nguyên thì bỏ qua câu.
-                    pending = ans if warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT",
-                                       "Hoạt chất phải so")) else None
+                    pending = ans if (KEEP_PENDING_ALL or warn.startswith(("Đang so sánh cột", "Đếm SỐ ĐƠN", "str.contains(", "Lọc thời gian phải dùng", "Code đang TỰ VIẾT",
+                                       "Hoạt chất phải so"))) else None
                     messages.append({"role": "user", "content":
                                      f"Kết quả in ra:\n```\n{out}\n```\nANSWER hiện tại: {ans}\n"
                                      f"KIỂM TRA LẠI: {warn}\nNếu cần sửa thì viết code mới và gán lại ANSWER; "

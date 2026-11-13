@@ -43,6 +43,8 @@ _LUAT = {
     "gia": "cho mot don vi co ban truoc chiet khau dong",
     "tang_gia": "so so luong don vi co ban n ngay ke tu d",
     "gia_nhap": "binh quan theo so luong nhap",
+    "no": "cac khoan tra sau ngay mua co ngay tra trong ky",
+    "no_con": "con no cong cac don con no",
 }
 
 
@@ -69,6 +71,11 @@ def try_solve(question, periods, biz, rulebook=None):
         x = g[_in(g["ngay_giao"], p, ban if ban is not None else g.rename(columns={"ngay_giao": "ngay"}))]
         return {"type": "number", "answer": int(len(x.drop_duplicates(["ma_don", "dot"])))}, \
             "Số đợt giao = số cặp (mã đơn, đợt) khác nhau có ngày giao trong kỳ"
+
+    # 8) CÔNG NỢ (§4) — train 61/61, eval300 11/11
+    r = giai_no(f, periods, biz, rulebook)
+    if r:
+        return r[0], "Công nợ §4 (" + r[1] + ") từ bảng chuẩn cong_no_don + thu_tien"
 
     # 0) shop KHÔNG ghi khách (mọi đơn là khách lẻ) mà câu hỏi về khách -> không trả lời được (train 8/8)
     if ban is not None and len(ban) and _co_luat(rulebook, "khong_du") \
@@ -188,3 +195,114 @@ def try_solve(question, periods, biz, rulebook=None):
         return {"type": "number", "answer": len(tat_ca - da_ban)}, \
             "Mặt hàng đã từng bán tới hết kỳ nhưng trong kỳ không bán được (đơn tính doanh thu)"
     return None
+
+
+# ---------------------------------------------------------------- CÂU KHÔNG TRẢ LỜI ĐƯỢC (dữ liệu không có thông tin hỏi)
+def _cot_co(biz, pat):
+    """Có bảng nào có cột (tên hoặc ý nghĩa README) khớp mẫu không."""
+    for t, df in biz.tables.items():
+        mm = biz.col_meaning.get(t, {})
+        for c in df.columns:
+            if re.search(pat, fold(c).replace("_", " ")) or re.search(pat, fold(mm.get(c, ""))):
+                if df[c].notna().any():
+                    return True
+    return False
+
+
+def khong_du_du_lieu(question, biz):
+    """Lý do (chuỗi) nếu câu hỏi cần thông tin mà dữ liệu của shop KHÔNG có -> unanswerable; ngược lại None.
+    Chỉ dùng các luật đã kiểm trên toàn bộ train (không câu nào có đáp án bị nhận nhầm)."""
+    f = fold(question)
+    # 1) đánh giá chủ quan về nhân viên / lời khuyên dùng thuốc: dữ liệu bán hàng không ghi
+    if re.search(r"lanh nghe|tay nghe|tan tam|le phep|chu dao|quy men|\bhay khen\b|duoc khen|than thien|nhiet tinh", f):
+        return "dữ liệu không ghi đánh giá về nhân viên"
+    if re.search(r"nen uong|lieu dung|moi lan (uong )?may vien|tac dung phu|chong chi dinh", f):
+        return "dữ liệu bán hàng không có hướng dẫn dùng thuốc"
+    # 2) giới tính khách
+    if re.search(r"\bkhach (hang )?(nu|nam)\b|gioi tinh", f) and not _cot_co(biz, r"gioi tinh|gender|\bphai\b"):
+        return "dữ liệu không ghi giới tính khách"
+    # 3) địa chỉ khách
+    if re.search(r"\bkhach\b.{0,25}\b(o |nha o |tai )?duong [a-z]", f) and not _cot_co(biz, r"dia chi|address|\bduong\b"):
+        return "dữ liệu không ghi địa chỉ khách"
+    # 4) shop KHÔNG có hẳn nguồn dữ liệu được hỏi (không có bảng nhập / công nợ / tồn kho / hạn dùng)
+    co_nhap = getattr(biz, "nhap", None) is not None or _cot_co(biz, r"gia nhap|\bnhap\b|nha cung cap|\bncc\b")
+    co_ton = _cot_co(biz, r"\bton\b|ton kho|ton cuoi|so luong ton")
+    # câu hỏi về BÁN (vd "tính nhập thêm máy, tháng này BÁN ra mấy máy") thì không phải câu hỏi nhập hàng
+    hoi_ban = re.search(r"\bban\b|doanh thu", f)
+    if re.search(r"\bnhap\b|nha cung cap", f) and not co_nhap and not hoi_ban:
+        return "shop không có dữ liệu nhập hàng"
+    if re.search(r"\bton\b|trong kho|con hang|het hang|dut hang", f) and not co_ton and not co_nhap:
+        return "shop không có dữ liệu tồn kho, nhập hàng"
+    # "hạn" của nợ / trả góp ("tới hạn", "kỳ góp", "hạn đúng hôm nay") không phải hạn dùng; bỏ dấu thì "đúng" = "dùng"
+    han_no = re.search(r"\bno\b|cong no|chiu|tra gop|\bgop\b|\bky\b|phai tra|toi han|den han|qua han|dung han", f) \
+        or re.search(r"hạn đúng|đúng hạn", question.lower())
+    if re.search(r"han dung|het han|\bhsd\b", f) and not han_no and not _cot_co(biz, r"han ?dung|han ?su ?dung|\bhsd\b|het ?han|expir|\bdate\b"):
+        return "shop không có dữ liệu hạn dùng"
+    if re.search(r"\bno\b|cong no|mua chiu|ghi no|tra no|thu hoi|con thieu|thieu tien", f) \
+            and getattr(biz, "no_don", None) is None and not _cot_co(biz, r"\bno\b|cong no|ghi no|con thieu|da tra|tien thu|thanh toan"):
+        return "shop không có dữ liệu công nợ"
+    return None
+
+
+# ---- CÔNG NỢ §4 bằng bảng chuẩn cong_no_don (O) + thu_tien (T) ----
+# còn nợ đến hết ngày X (kể cả 'đơn đặt quá N ngày'), thu / trả nợ trong kỳ, nợ thêm trong kỳ, 'nợ thêm và trả được' của một khách.
+# Train (ngoài eval300): 61/61 đúng. eval300 (không dùng khi viết): 11/11 đúng (v3.10 bằng model: -3/11).
+def _ten_khach(f, O):
+    hits=[]
+    if "ten_khach" in O:
+        for n in O["ten_khach"].dropna().unique():
+            k=fold(str(n)).strip()
+            if len(k)>=5 and re.search(rf"(?<!\w){re.escape(k)}(?!\w)", f): hits.append(n)
+    if not hits and "ma_khach" in O:
+        for m in re.findall(r"\bkh ?\d{3,}\b", f):
+            mm=m.replace(" ","")
+            hits += [n for n in O["ma_khach"].dropna().unique() if fold(str(n)).replace(" ","")==mm]
+    return hits
+def giai_no(f, periods, biz, rulebook=None):
+    if not (_co_luat(rulebook, "no") and _co_luat(rulebook, "no_con")):
+        return None
+    O=getattr(biz,"no_don",None); T=getattr(biz,"thu_tien",None)
+    if O is None or T is None or len(periods)!=1: return None
+    if re.search(r"\bmay khach|bao nhieu khach|so khach|\btop\b|nhieu nhat|it nhat|lon nhat|\bai\b|don nao|khach nao|qua han|tuoi no|trung binh|%|ti le|ty le|\bdon\b.{0,10}(bao nhieu|may)|(bao nhieu|may) (don|lan|phieu)|tien mat|chuyen khoan|\bnguoi\b|\bdem\b|ca \d|\bca (sang|chieu|toi)", f): return None
+    p=periods[0]
+    thu=re.search(r"thu (hoi |ve )?(duoc |dc )?(bao nhieu |nhieu |nhieu )?(tien )?(cong )?no|tra (bot |dan |them |lai )?(duoc |dc )?(bao nhieu |nhieu )?(tien )?no|thu no|tra bot", f)
+    them=re.search(r"no them|ghi no them|mua chiu them|chiu them|ghi so them|thieu them", f)
+    if them and not thu: thu=re.search(r"tra (duoc|dc|lai) (bao nhieu|bn|nhieu|may)|tra bao nhieu", f)
+    tuoi=re.search(r"(qua|hon|tren|da hon|lau hon) (\d+) ngay", f)
+    con=re.search(r"con no|dang no|con thieu|chua tra|tong (cong )?no|cong no|\bno\b (bao nhieu|nhieu|tong)", f) and not thu and not them
+    if not (thu or them or con): return None
+    names=_ten_khach(f,O)
+    if len(names)>1: return None
+    O2=O[O["ghi_no"] & ~O["huy"]]
+    if names:
+        col="ten_khach" if names[0] in set(O["ten_khach"].dropna()) else "ma_khach"
+        O2=O2[O2[col]==names[0]]
+    ids=set(O2["ma_don"])
+    T2=T[T["ma_don"].isin(ids)]
+    nd=lambda s: pd.to_datetime(s,errors="coerce").dt.normalize()
+    X=pd.Timestamp(p.end)
+    st=pd.Timestamp(p.start) if p.start is not None else None
+    def inp(s):
+        d=nd(s); return (d<=X) & ((d>=st) if st is not None else True)
+    def v_thu(): return float(T2[T2["sau_ngay_mua"] & inp(T2["ngay_tra"])]["so_tien"].sum())
+    def v_them():
+        o=O2[inp(O2["ngay"])]
+        same=T2[nd(T2["ngay_tra"])==nd(T2["ngay_don"])].groupby("ma_don")["so_tien"].sum()
+        return float((o["tong_don"]-o["ma_don"].map(same).fillna(0)).clip(lower=0).sum())
+    def v_con():
+        o=O2[nd(O2["ngay"])<=X].copy()
+        da=T2[nd(T2["ngay_tra"])<=X].groupby("ma_don")["so_tien"].sum()
+        o["no"]=o["tong_don"]-o["ma_don"].map(da).fillna(0)
+        if tuoi: o=o[(X-nd(o["ngay"])).dt.days>int(tuoi[2])]
+        return float(o.loc[o["no"]>0,"no"].sum())
+    r=lambda v:int(round(v))
+    if thu and them:
+        a=[r(v_them()), r(v_thu())]
+        if re.search(r"tra.{0,40}no them|thu.{0,40}no them",f) and f.find("tra")<f.find("them"): a=a[::-1]
+        return {"type":"list","answer":a}, "no_them+thu"
+    if con:
+        if st is not None and p.kind!="snapshot" and not re.search(r"den (het )?(ngay|hom|nay|bay gio|hien)|tinh den|hien (tai|gio|nay)|bay gio|cuoi (thang|ngay|nam|quy|tuan)", f): return None
+        return {"type":"number","answer":r(v_con())}, "con_no"
+    if st is None: return None
+    if thu: return {"type":"number","answer":r(v_thu())}, "thu_no"
+    return {"type":"number","answer":r(v_them())}, "no_them"

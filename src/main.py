@@ -154,6 +154,7 @@ def main():
     ap.add_argument("--business", default="")
     ap.add_argument("--sample", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--ids", default="", help="file danh sách câu cần chạy (jsonl có trường id, hoặc mỗi dòng một id)")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--resume", action="store_true",
                     help="chạy tiếp: giữ các câu đã có trong submission.jsonl, chỉ chạy các câu còn thiếu")
@@ -169,6 +170,14 @@ def main():
     questions = load_questions(args.data)
     if args.business:
         questions = [q for q in questions if q["business_id"] == args.business]
+    if args.ids:
+        want = []
+        for line in open(args.ids, encoding="utf-8"):
+            line = line.strip()
+            if line:
+                want.append(json.loads(line)["id"] if line.startswith("{") else line)
+        pos = {i: k for k, i in enumerate(want)}
+        questions = sorted([q for q in questions if q["id"] in pos], key=lambda q: pos[q["id"]])
     if args.sample:
         questions = random.Random(args.seed).sample(questions, min(args.sample, len(questions)))
     if args.limit:
