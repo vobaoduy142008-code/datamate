@@ -70,6 +70,10 @@ ABSTAIN_STEPS = int(os.environ.get("AGENT_ABSTAIN_STEPS", "0"))
 ONLY_FORMULA = os.environ.get("AGENT_ONLY_FORMULA", "1") == "1"
 # dieu_phoi = model Qwen điều phối: chọn công cụ (module công thức) + chuẩn hoá câu + kiểm duyệt kết quả (xem cong_cu.py). Mặc định giữ chế độ cũ.
 AGENT_MODE = os.environ.get("AGENT_MODE", "").lower()
+# v6 = agent do model dẫn dắt (model hiểu câu -> DSL -> engine -> model đọc kết quả; xem agent_v6.py, docs/kien_truc_v6.md)
+if AGENT_MODE == "v6":
+    import agent_v6
+    agent_v6.khoi_dong()          # nạp kho ví dụ ở tiến trình cha (các câu fork từ đây)
 
 # --------------------------------------------------------------------------- bộ nhớ đệm
 
@@ -1042,8 +1046,26 @@ def solve(question: dict, data_dir: str) -> dict:
     return out
 
 
-def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
-    t0 = time.time()
+def _cong_thuc_doi_chieu(question, data_dir):
+    """v6 / bước V: chạy pipeline công thức cũ (không gọi LLM) lấy đáp án đối chiếu -> (answer | None, mô tả)."""
+    r = _solve_once(question, data_dir, 0, _mode="formula")
+    a = r.get("answer") or {"type": "abstain"}
+    return (None if a.get("type") in ("abstain", None) else a), str(r.get("code") or "")[:150]
+
+
+def _giai_v6(question, data_dir, biz, rulebook, cal, t0):
+    import agent_v6
+    ctx = {"biz": biz, "ban": getattr(biz, "ban", None), "rulebook": rulebook, "cal": cal, "as_of": question["as_of_date"],
+           "het_gio": lambda: time.time() - t0 > TIME_BUDGET, "abstain_zero": ABSTAIN_ZERO, "normalize": normalize_answer,
+           "giai_code": lambda hint: _solve_once(question, data_dir, 0, _mode="code", _hint=hint, _t0=t0),
+           "giai_cong_thuc": lambda: _cong_thuc_doi_chieu(question, data_dir)}
+    return agent_v6.giai(question, ctx)
+
+
+def _solve_once(question: dict, data_dir: str, variant: int = 0, _mode=None, _hint: str = "", _t0=None) -> dict:
+    """_mode (nội bộ cho AGENT_MODE=v6): None = chế độ bình thường; "formula" = chỉ pipeline công thức (không LLM);
+    "code" = bỏ qua mọi công thức, chỉ vòng LLM viết code (ONLY_FORMULA bị bỏ qua)."""
+    t0 = _t0 or time.time()
     rulebook, cal = _static(data_dir)
     biz = _business(data_dir, question["business_id"])
     today = pd.Timestamp(question["as_of_date"])
@@ -1097,7 +1119,14 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
     except Exception:
         pass
     # CHẾ ĐỘ ĐIỀU PHỐI (AGENT_MODE=dieu_phoi): model chọn công cụ / chuẩn hoá câu / kiểm duyệt; module công thức chỉ tính
-    if AGENT_MODE == "dieu_phoi":
+    if AGENT_MODE == "v6" and _mode is None:
+        try:
+            return _giai_v6(question, data_dir, biz, rulebook, cal, t0)
+        except Exception:
+            return {"answer": {"type": "abstain"}, "thinking": None, "code": "", "steps": 0,
+                    "output": ["Lỗi chế độ v6 -> bỏ qua: " + traceback.format_exc()[-600:]],
+                    "seconds": round(time.time() - t0, 1)}
+    if AGENT_MODE == "dieu_phoi" and _mode is None:
         try:
             return cong_cu.giai(question, cong_cu.BoiCanh(biz, ban, ban_ok, rulebook, cal, question["as_of_date"]))
         except Exception:
@@ -1107,7 +1136,7 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
     # NGÀNH RIÊNG của rulebook public (sửa xe, mẹ và bé, điện thoại): module nhận diện ngành theo đặc điểm dữ liệu,
     # đọc bảng gốc (không cần bảng chuẩn qua cổng). Chạy trước mọi công thức khác.
     try:
-        if all(pd.Timestamp(p.end) <= today for p in periods):
+        if _mode != "code" and all(pd.Timestamp(p.end) <= today for p in periods):
             q0, f0 = question["question"], fold(chuan_hoa(question["question"]))
             for mod in (ct_suaxe, ct_mevabe, ct_dienthoai):
                 try:
@@ -1122,8 +1151,8 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
         pass
     # loại câu có công thức cố định trong rulebook (đã kiểm trên train) -> giải thẳng, không cần LLM
     try:
-        r = None if not ban_ok else cong_thuc.try_solve(chuan_hoa(question["question"]), periods, biz, rulebook)
-        if r is None and ban_ok and all(pd.Timestamp(p.end) <= today for p in periods):
+        r = None if (not ban_ok or _mode == "code") else cong_thuc.try_solve(chuan_hoa(question["question"]), periods, biz, rulebook)
+        if r is None and ban_ok and _mode != "code" and all(pd.Timestamp(p.end) <= today for p in periods):
             # công thức cố định do nhóm viết (Sonnet), mỗi module 0 câu sai trên train dev + eval300:
             # câu cơ bản (ct_coban), % tăng giảm / tỉ trọng (ct_tyle), top / xếp hạng / khách (ct_top)
             q0, f0 = question["question"], fold(chuan_hoa(question["question"]))
@@ -1136,7 +1165,7 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     r = (r[0], f"{mod.__name__}: {r[1]}")
                     break
                 r = None
-        if r is None and all(pd.Timestamp(p.end) <= today for p in periods):
+        if r is None and _mode != "code" and all(pd.Timestamp(p.end) <= today for p in periods):
             # v4.1 (nhóm Sonnet đợt 3): luật riêng public + nhập hàng, công nợ / tồn kho / lô, câu thường hỏi lạ.
             # Chỉ chạy khi các công thức trên không bắt -> đáp án v4.0 giữ nguyên.
             q0, f0 = question["question"], fold(chuan_hoa(question["question"]))
@@ -1163,7 +1192,7 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     "steps": 0, "seconds": round(time.time() - t0, 1)}
     except Exception:
         pass
-    if ONLY_FORMULA:
+    if (ONLY_FORMULA or _mode == "formula") and _mode != "code":
         # v4.0 (public 0,655): không có công thức chắc chắn -> bỏ qua, không đoán bằng LLM
         return {"answer": {"type": "abstain"}, "thinking": None, "code": "", "steps": 0,
                 "output": ["Không có công thức cố định cho câu này -> bỏ qua (AGENT_ONLY_FORMULA=1)"],
@@ -1198,7 +1227,7 @@ def _solve_once(question: dict, data_dir: str, variant: int = 0) -> dict:
                     + "".join(_std_schema(n, tables.get(n)) for n in ("nhap_hang_chuan", "cong_no_don", "thu_tien", "giao_hang_chuan"))
                     + "\n# Các bảng GỐC của shop\n" + biz.schema_text()), today=question["as_of_date"],
             data_end=biz.data_end or "không ghi", periods=p_text, question=_q_with_note(question["question"], biz))
-            + (_VARIANT_NOTE if variant else "")},
+            + (_VARIANT_NOTE if variant else "") + (("\n\n" + _hint) if _hint else "")},
     ]
     thinking_log, codes, outputs = [], [], []
     critiqued = 0

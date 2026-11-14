@@ -10,3 +10,13 @@ models/
 src/ngram_dau.json
 _cu/
 _dev/
+# fine-tune / dữ liệu sinh ra (lớn hoặc chứa câu hỏi + đáp án của dữ liệu cuộc thi) — không đưa lên GitHub
+models_ft/
+adapters/
+*.gguf
+*.safetensors
+training_code/dsl/sft_raw.jsonl
+training_code/dsl/that_bai.jsonl
+training_code/dsl/vi_du_sinh.jsonl
+.venv-gguf/
+llama.cpp/
