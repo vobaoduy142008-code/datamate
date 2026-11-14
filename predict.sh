@@ -29,6 +29,9 @@ export LLM_NUM_CTX=${LLM_NUM_CTX:-32768}
 export LLM_TIMEOUT=${LLM_TIMEOUT:-300}
 export AGENT_TIME_BUDGET=${AGENT_TIME_BUDGET:-300}
 export AGENT_VERBOSE=0
+# v5.0: model Qwen3-8B điều phối công cụ (chọn công cụ, chuẩn hoá câu, kiểm duyệt); câu không có công cụ -> bỏ qua
+export AGENT_MODE=${AGENT_MODE:-dieu_phoi}
+export AGENT_ONLY_FORMULA=${AGENT_ONLY_FORMULA:-1}
 export DATAMATE_CACHE=${DATAMATE_CACHE:-/tmp/datamate_cache}
 export PYTHONUNBUFFERED=1
 # Ollama: chỉ trong máy, giữ model trên GPU suốt lúc chạy, 1 yêu cầu một lúc

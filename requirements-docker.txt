@@ -1,6 +1,7 @@
-# Thư viện của agent bên trong Docker (cài riêng vào /opt/agent/lib, không đụng tới thư viện của vLLM).
-# Cùng phiên bản với máy phát triển (MacBook) để kết quả giống nhau.
-pandas==3.1.1
-numpy==2.5.4
+# Thư viện của agent bên trong Docker (cài riêng vào /opt/agent).
+# PHẢI đúng các phiên bản này: toàn bộ công thức (bản public 0,655 / v4.1 / v5.0) được kiểm trên pandas 2.3.3 + numpy 2.2.6
+# + openpyxl 3.1.5 và KHÔNG có python-calamine. pandas 3.x đổi kiểu chuỗi mặc định -> nhiều bước nhận diện cột / ngành
+# lặng lẽ không chạy (lượt chạy Mac bằng pandas 3.1.1 mất 54 câu so với bản kiểm tra).
+pandas==2.3.3
+numpy==2.2.6
 openpyxl==3.1.5
-python-calamine==0.9.1

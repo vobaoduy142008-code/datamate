@@ -415,6 +415,7 @@ def find_periods(question: str, as_of, cal: Optional[Calendar] = None) -> list[P
     rel = [
         (r"tu dau thang (nay )?den het (ngay )?hom nay|tu dau thang( nay)?|thang nay", lambda: this_month(a)),
         (r"(tu )?dau nam( nay)?( (den|toi) (het )?(ngay )?(hom nay|nay|gio|chu))?", lambda: year_to_date(a)),
+        (r"(?<!dau )nam nay,? (tinh )?(den|toi) (het )?(ngay )?(hom nay|bay gio|gio)", lambda: year_to_date(a)),
         (r"tuan nay", lambda: this_week(a)),
         (r"quy nay", lambda: this_quarter(a)),
         (r"(?<!cung ky )(?<!hon )(?<!voi )quy (truoc|roi|vua roi)", lambda: _rel_prev(last_quarter(a))),

@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 COPY requirements-docker.txt /code/requirements-docker.txt
 RUN uv venv --python 3.12 /opt/agent \
  && VIRTUAL_ENV=/opt/agent uv pip install -r /code/requirements-docker.txt \
- && /opt/agent/bin/python -c "import pandas, openpyxl, python_calamine; print('pandas', pandas.__version__)"
+ && /opt/agent/bin/python -c "import pandas, numpy, openpyxl; print('pandas', pandas.__version__, 'numpy', numpy.__version__)"
 
 # 3) Trọng số model: tải về ngay trong lúc build, nằm sẵn trong image (khi chạy chấm thì mạng tắt)
 ARG MODEL=qwen3:8b
